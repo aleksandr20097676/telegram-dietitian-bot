@@ -1,0 +1,18 @@
+# Telegram Dietitian Bot Dependencies
+# Python 3.9+
+
+# Telegram Bot
+aiogram==3.15.0
+
+# OpenAI GPT-5.2
+openai==1.58.1
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Database
+# SQLite3 is included in Python standard library
+
+# Additional utilities
+aiohttp==3.11.10
+aiofiles==24.1.0
