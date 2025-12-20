@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-openai_client = AsyncOpenAI(api_key=str(OPENAI_API_KEY), http_client=None)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 db = Database()
 
 # States
