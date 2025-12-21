@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Telegram Dietitian Bot - Photo Food Analysis
-Uses OpenAI for food recognition and calorie calculation
+Telegram Dietitian Bot - remembers user profile (name/weight/height/age/goal/activity)
+and does NOT ask again unless profile is missing or user uses /reset.
 """
 
 import asyncio
@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.fsm.storage.memory import MemoryStorage
+
 import httpx
 from openai import AsyncOpenAI
 
@@ -19,100 +20,127 @@ from openai import AsyncOpenAI
 from config import TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL
 from database import FOOD_DATABASE
 from languages import detect_language, get_text
-from db import init_db, get_user, upsert_user, add_message, get_recent_messages
 
-# Configure logging
+# DB helpers (must exist in your db.py; based on your screenshots)
+from db import (
+    init_db,
+    ensure_user,
+    add_message,
+    get_recent_messages,
+    set_facts,
+    get_all_facts,
+)
+
+# ---------------- LOGGING ----------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
+# ---------------- OPENAI ----------------
 http_client = httpx.AsyncClient(timeout=60.0)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
 
-# Initialize bot and dispatcher
+# ---------------- TELEGRAM ----------------
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# -----------------------------
-# Helpers (onboarding + parsing)
-# -----------------------------
+# ---------------- HELPERS ----------------
 
 def _clean_text(s: str) -> str:
     return (s or "").strip()
 
-def parse_three_numbers(text: str):
+def _extract_three_numbers(text: str):
     """
-    Берём первые три числа из текста:
-    1-е = вес, 2-е = рост, 3-е = возраст
-    Поддерживает: "114,182,49" / "114 182 49" / "вес 114 рост 182 возраст 49" / "114/182/49"
+    Accepts: "114, 182, 49" or "114 182 49" or "вес 114 рост 182 возраст 49"
+    Returns tuple (weight_kg, height_cm, age) as ints or None
     """
-    nums = re.findall(r"\d+", text or "")
+    nums = re.findall(r"\d{1,3}", text)
     if len(nums) < 3:
         return None
     w, h, a = int(nums[0]), int(nums[1]), int(nums[2])
+
+    # Basic sanity (so bot doesn't store nonsense)
+    if not (30 <= w <= 300):
+        return None
+    if not (120 <= h <= 230):
+        return None
+    if not (10 <= a <= 100):
+        return None
+
     return w, h, a
 
-def normalize_goal(text: str):
-    t = (text or "").lower()
-    if any(x in t for x in ["похуд", "сброс", "минус", "fat loss", "lose"]):
+def _profile_missing(facts: dict) -> str | None:
+    """
+    Returns the next missing field key or None if profile is complete.
+    We store everything in user_facts for simplicity.
+    """
+    required = ["name", "weight_kg", "height_cm", "age", "goal", "activity"]
+    for k in required:
+        v = (facts.get(k) or "").strip()
+        if not v:
+            return k
+    return None
+
+def _goal_from_text(text: str) -> str | None:
+    t = text.lower()
+    if any(x in t for x in ["похуд", "сброс", "сниз", "минус"]):
         return "похудеть"
-    if any(x in t for x in ["набрат", "масса", "набор", "gain"]):
+    if any(x in t for x in ["набрать", "массу", "прибав", "плюс"]):
         return "набрать"
-    if any(x in t for x in ["удерж", "поддерж", "maintenance"]):
-        return "удержание"
+    if any(x in t for x in ["поддерж", "держать", "сохран"]):
+        return "поддерживать"
     return None
 
-def normalize_activity(text: str):
-    t = (text or "").lower().strip()
-    # Можно ответить цифрой
-    if t in ["1", "2", "3", "4"]:
-        return t
-    # Или словами
-    if any(x in t for x in ["сидяч", "офис", "мало", "почти нет"]):
-        return "1"
-    if any(x in t for x in ["немного", "ходьба", "5", "6", "7", "8", "тыс"]):
-        return "2"
-    if any(x in t for x in ["трен", "спорт", "зал", "3 раза", "4 раза"]):
-        return "3"
-    if any(x in t for x in ["тяж", "стройка", "физ", "каждый день", "работа"]):
-        return "4"
+def _activity_from_text(text: str) -> str | None:
+    t = text.lower()
+    if any(x in t for x in ["сидяч", "миним", "низк", "офис", "мало хожу"]):
+        return "низкая"
+    if any(x in t for x in ["средн", "умерен", "хожу", "2-3", "трен 1-3"]):
+        return "средняя"
+    if any(x in t for x in ["высок", "спорт", "трен 4-7", "тяжел", "физич"]):
+        return "высокая"
     return None
 
-async def ensure_user_row(message: Message, user_language: str):
-    """
-    Обновляем базовые поля пользователя в БД (если есть такая таблица).
-    """
-    try:
-        await upsert_user(
-            message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-            language=user_language,
+async def _ask_next_question(message: Message, user_language: str, facts: dict):
+    missing = _profile_missing(facts)
+    if not missing:
+        return
+
+    if missing == "name":
+        await message.answer("Как тебя зовут? Напиши просто имя 🙂")
+        return
+
+    if missing in ("weight_kg", "height_cm", "age"):
+        await message.answer(
+            "Напиши **тремя числами**: вес (кг), рост (см), возраст.\n"
+            "Например: `114, 182, 49` или `114 182 49`"
         )
-    except Exception as e:
-        logger.warning(f"ensure_user_row upsert_user failed: {e}")
+        return
 
-async def onboarding_stage(user: dict) -> str:
-    """
-    Определяем, какой шаг анкеты нужен прямо сейчас, исходя из того, что уже есть в БД.
-    Если что-то не записалось — бот не будет 'ходить по кругу', а спросит конкретно.
-    """
-    if not user or not user.get("name"):
-        return "ask_name"
-    if not user.get("goal"):
-        return "ask_goal"
-    if not (user.get("weight_kg") and user.get("height_cm") and user.get("age")):
-        return "ask_profile"
-    if not user.get("activity"):
-        return "ask_activity"
-    return "ready"
+    if missing == "goal":
+        await message.answer(
+            "Какая цель?\n"
+            "1) похудеть\n"
+            "2) набрать\n"
+            "3) поддерживать\n"
+            "Ответь одним словом."
+        )
+        return
 
-# -----------------------------
-# OpenAI features
-# -----------------------------
+    if missing == "activity":
+        await message.answer(
+            "Какая у тебя активность?\n"
+            "1) низкая (сидячая работа)\n"
+            "2) средняя (ходьба/тренировки 1–3 раза)\n"
+            "3) высокая (физическая работа/тренировки 4–7 раз)\n"
+            "Ответь: низкая / средняя / высокая."
+        )
+        return
+
+
+# ---------------- GPT FUNCTIONS ----------------
 
 async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
     try:
@@ -120,79 +148,96 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
 
         db_description = "Available food database:\n"
         for food_name, food_data in FOOD_DATABASE.items():
-            db_description += f"- {food_name}: {food_data['calories']} kcal per {food_data['portion']}, "
-            db_description += f"Protein: {food_data['protein']}g, Carbs: {food_data['carbs']}g, Fat: {food_data['fat']}g\n"
+            db_description += (
+                f"- {food_name}: {food_data['calories']} kcal per {food_data['portion']}, "
+                f"Protein: {food_data['protein']}g, Carbs: {food_data['carbs']}g, Fat: {food_data['fat']}g\n"
+            )
 
-        prompt = get_text(user_language, "analysis_prompt").format(db_description=db_description)
+        prompt = (
+            "Ты диетолог. Определи еду на фото и оцени калории и БЖУ.\n"
+            "Используй базу ниже как подсказку, но если еды там нет — оцени по опыту.\n\n"
+            f"{db_description}\n"
+            "Ответ дай кратко и по делу."
+        )
 
         response = await openai_client.chat.completions.create(
             model=GPT_MODEL,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "high"}}
-                ]
-            }],
-            max_tokens=1000,
-            temperature=0.7
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                }
+            ],
+            max_tokens=800,
+            temperature=0.5,
         )
 
-        result = response.choices[0].message.content
-        logger.info(f"Analysis completed for {user_language} language")
-        return result
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
         logger.error(f"Error analyzing photo: {e}")
         return get_text(user_language, "error_analysis")
 
+
 async def chat_reply(user_id: int, user_text: str, user_language: str) -> str:
     """
-    Обычный чат, но с контекстом профиля + последние сообщения.
+    Uses: profile facts + recent messages context.
     """
     try:
-        user = await get_user(user_id)
-        profile_line = ""
-        if user:
-            profile_line = (
-                f"Профиль пользователя: имя={user.get('name')}, "
-                f"цель={user.get('goal')}, вес={user.get('weight_kg')}, рост={user.get('height_cm')}, возраст={user.get('age')}, "
-                f"активность={user.get('activity')}.\n"
-            )
+        facts = await get_all_facts(user_id)
+
+        profile_line = (
+            f"Профиль пользователя: "
+            f"имя={facts.get('name','')}, "
+            f"вес={facts.get('weight_kg','')}кг, "
+            f"рост={facts.get('height_cm','')}см, "
+            f"возраст={facts.get('age','')}, "
+            f"цель={facts.get('goal','')}, "
+            f"активность={facts.get('activity','')}."
+        )
 
         system_ru = (
-            "Ты дружелюбный и умный диетолог. Общайся как человек: "
-            "задай 1-2 уточняющих вопроса, предложи план, отвечай коротко и по делу. "
-            "Без воды. Если уместно — предложи прислать фото еды для точного подсчёта.\n"
-            + profile_line
+            "Ты дружелюбный и умный диетолог. Общайся как человек. "
+            "Отвечай коротко и по делу. "
+            "Используй профиль пользователя и не переспрашивай то, что уже есть в профиле. "
+            "Если чего-то нет — попроси конкретно недостающий пункт одним вопросом."
         )
         system_cs = (
-            "Jsi přátelský a chytrý dietolog. Mluv jako člověk: "
-            "polož 1–2 doplňující otázky, navrhni plán, odpovídej stručně a věcně. "
-            "Když se hodí, nabídni poslat fotku jídla pro přesnější výpočet.\n"
-            + profile_line
+            "Jsi přátelský a chytrý dietolog. Mluv jako člověk. "
+            "Odpovídej stručně a věcně. "
+            "Používej profil uživatele a neptej se znovu na údaje, které už máš. "
+            "Pokud něco chybí, zeptej se jen na chybějící údaj."
         )
         system_en = (
-            "You are a friendly and smart dietitian. Talk like a human: "
-            "ask 1–2 clarifying questions, suggest a plan, keep it concise and useful. "
-            "If relevant, suggest sending a food photo for accurate calculation.\n"
-            + profile_line
+            "You are a friendly and smart dietitian. Be concise and practical. "
+            "Use the user profile and do not ask again for data already present. "
+            "If something is missing, ask only for the missing item."
         )
 
         system_map = {"ru": system_ru, "cs": system_cs, "en": system_en}
         system_prompt = system_map.get(user_language, system_en)
 
-        history = []
-        try:
-            history = await get_recent_messages(user_id, limit=12)
-        except Exception as e:
-            logger.warning(f"get_recent_messages failed: {e}")
+        history = await get_recent_messages(user_id, limit=12)
+        # history should be list of dicts: {"role": "user"/"assistant", "content": "..."}
+        messages = [{"role": "system", "content": system_prompt + "\n" + profile_line}]
 
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            # ожидается [{"role": "...", "content": "..."}]
-            messages.extend(history[-12:])
+        # add history
+        for m in history:
+            r = m.get("role")
+            c = m.get("content")
+            if r in ("user", "assistant") and c:
+                messages.append({"role": r, "content": c})
+
+        # add current user message
         messages.append({"role": "user", "content": user_text})
 
         resp = await openai_client.chat.completions.create(
@@ -208,175 +253,211 @@ async def chat_reply(user_id: int, user_text: str, user_language: str) -> str:
         logger.error(f"Error in chat_reply: {e}")
         return get_text(user_language, "error_general")
 
-# -----------------------------
-# Handlers
-# -----------------------------
+
+# ---------------- HANDLERS ----------------
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    user_id = message.from_user.id
     user_language = detect_language(message.from_user.language_code)
-    await ensure_user_row(message, user_language)
 
-    # Принудительно начинаем с имени
-    await upsert_user(message.from_user.id, name=None)  # сброс имени, если хочешь заново
-    await message.answer("Привет! 😊 Я твой AI-диетолог.\nКак тебя зовут?")
+    # Ensure user exists in DB
+    await ensure_user(
+        user_id=user_id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        language=user_language,
+    )
 
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
+    facts = await get_all_facts(user_id)
+    missing = _profile_missing(facts)
+
+    if not missing:
+        name = facts.get("name", "")
+        await message.answer(f"Привет, {name}! 🙂 Я готов. Напиши вопрос или пришли фото еды.")
+        return
+
+    await message.answer("Привет! 🙂 Я AI-диетолог. Давай быстро настроим профиль, и я всё запомню.")
+    await _ask_next_question(message, user_language, facts)
+
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: Message):
+    user_id = message.from_user.id
+    facts = await get_all_facts(user_id)
+
+    if not facts:
+        await message.answer("Профиль пуст. Напиши /start")
+        return
+
+    await message.answer(
+        "Вот что я запомнил:\n"
+        f"Имя: {facts.get('name','—')}\n"
+        f"Вес: {facts.get('weight_kg','—')} кг\n"
+        f"Рост: {facts.get('height_cm','—')} см\n"
+        f"Возраст: {facts.get('age','—')}\n"
+        f"Цель: {facts.get('goal','—')}\n"
+        f"Активность: {facts.get('activity','—')}\n\n"
+        "Если нужно заново — /reset"
+    )
+
+
+@dp.message(Command("reset"))
+async def cmd_reset(message: Message):
+    user_id = message.from_user.id
     user_language = detect_language(message.from_user.language_code)
-    await message.answer(get_text(user_language, "help"))
+
+    # "Reset" by overwriting facts to empty values
+    await set_facts(user_id, {
+        "name": "",
+        "weight_kg": "",
+        "height_cm": "",
+        "age": "",
+        "goal": "",
+        "activity": "",
+    })
+
+    await message.answer("Ок, сбросил профиль. Начнём заново 🙂")
+    facts = await get_all_facts(user_id)
+    await _ask_next_question(message, user_language, facts)
+
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
+    user_id = message.from_user.id
     user_language = detect_language(message.from_user.language_code)
-    await ensure_user_row(message, user_language)
+
+    # Ensure user exists
+    await ensure_user(
+        user_id=user_id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        language=user_language,
+    )
+
+    # If profile missing, guide user first (optional)
+    facts = await get_all_facts(user_id)
+    missing = _profile_missing(facts)
+    if missing:
+        await message.answer("Сначала заполним профиль, чтобы расчёты были точнее 🙂")
+        await _ask_next_question(message, user_language, facts)
+        return
 
     try:
         status_msg = await message.answer(get_text(user_language, "analyzing"))
+
         photo = message.photo[-1]
         photo_file = await bot.get_file(photo.file_id)
         photo_bytes = await bot.download_file(photo_file.file_path)
 
         result = await analyze_food_photo(photo_bytes.read(), user_language)
+
         await status_msg.delete()
         await message.answer(result)
+
+        # Save to history
+        await add_message(user_id, "user", "[photo]")
+        await add_message(user_id, "assistant", result)
 
     except Exception as e:
         logger.error(f"Error handling photo: {e}")
         await message.answer(get_text(user_language, "error_general"))
 
+
 @dp.message()
 async def handle_text(message: Message):
-    user_language = detect_language(message.from_user.language_code)
-    await ensure_user_row(message, user_language)
-
     user_id = message.from_user.id
+    user_language = detect_language(message.from_user.language_code)
     text_raw = _clean_text(message.text)
     text_low = text_raw.lower()
 
-    # Подтягиваем пользователя из БД, чтобы понимать какой шаг
-    user = None
-    try:
-        user = await get_user(user_id)
-    except Exception as e:
-        logger.warning(f"get_user failed: {e}")
+    # Ensure user exists
+    await ensure_user(
+        user_id=user_id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        language=user_language,
+    )
 
-    stage = await onboarding_stage(user or {})
-
-    # Если человек пишет "привет" и анкета не готова — всё равно начинаем анкету
-    greetings = ["привет", "здравств", "hello", "hi", "ahoj", "čau"]
-    if any(g in text_low for g in greetings) and stage != "ready":
-        # Если имени нет — спросим имя
-        if stage == "ask_name":
-            await message.answer("Привет! 😊 Как тебя зовут?")
-            return
-
-    # --- Шаг 1: имя ---
-    if stage == "ask_name":
-        name = text_raw.strip()
-        # если человек прислал только числа/мусор, переспросим
-        if len(name) < 2 or re.fullmatch(r"[\d\W_]+", name or ""):
-            await message.answer("Напиши, пожалуйста, имя (например: Саша).")
-            return
-
-        await upsert_user(user_id, name=name, language=user_language)
-        await message.answer(
-            f"Отлично, {name}! Какая цель?\n"
-            "1) Похудеть\n2) Набрать\n3) Удержание\n\n"
-            "Можно просто написать: похудеть / набрать / удержание"
-        )
-        return
-
-    # --- Шаг 2: цель ---
-    if stage == "ask_goal":
-        goal = normalize_goal(text_raw)
-        if not goal:
-            await message.answer("Напиши цель одним словом: похудеть / набрать / удержание.")
-            return
-        await upsert_user(user_id, goal=goal)
-        await message.answer(
-            "Супер. Теперь пришли ТРИ числа: вес, рост, возраст.\n"
-            "Пример: 114, 182, 49\n"
-            "Можно через пробел или запятую — как угодно."
-        )
-        return
-
-    # --- Шаг 3: профиль (вес/рост/возраст) ---
-    if stage == "ask_profile":
-        parsed = parse_three_numbers(text_raw)
-        if not parsed:
-            nums = re.findall(r"\d+", text_raw or "")
-            if len(nums) == 0:
-                await message.answer("Мне нужны 3 числа: вес, рост, возраст. Например: 114, 182, 49")
-                return
-            if len(nums) == 1:
-                await message.answer("Я вижу только одно число. Нужно 3: вес, рост, возраст. Пример: 114, 182, 49")
-                return
-            if len(nums) == 2:
-                await message.answer("Я вижу два числа. Нужно 3: вес, рост, возраст. Пример: 114, 182, 49")
-                return
-
-        weight_kg, height_cm, age = parsed
-
-        # Небольшая защита от бредовых значений
-        if weight_kg < 30 or weight_kg > 300:
-            await message.answer("Вес выглядит странно. Напиши ещё раз 3 числа: вес, рост, возраст (пример: 114, 182, 49)")
-            return
-        if height_cm < 120 or height_cm > 230:
-            await message.answer("Рост выглядит странно. Напиши ещё раз 3 числа: вес, рост, возраст (пример: 114, 182, 49)")
-            return
-        if age < 10 or age > 100:
-            await message.answer("Возраст выглядит странно. Напиши ещё раз 3 числа: вес, рост, возраст (пример: 114, 182, 49)")
-            return
-
-        await upsert_user(user_id, weight_kg=weight_kg, height_cm=height_cm, age=age)
-
-        await message.answer(
-            "Принято ✅\n"
-            "Теперь активность (можно цифрой 1–4):\n"
-            "1) сидячая\n"
-            "2) немного ходьбы (5–8 тыс шагов)\n"
-            "3) тренировки 3–4 раза/нед\n"
-            "4) тяжёлая физическая работа"
-        )
-        return
-
-    # --- Шаг 4: активность ---
-    if stage == "ask_activity":
-        act = normalize_activity(text_raw)
-        if not act:
-            await message.answer("Выбери активность цифрой 1–4 (или напиши словами: сидячая / ходьба / тренировки / тяжёлая).")
-            return
-        await upsert_user(user_id, activity=act)
-
-        await message.answer("Отлично! Анкета готова ✅\nМожешь написать, что ел(а) сегодня, или пришли фото еды — посчитаю калории.")
-        return
-
-    # --- READY: обычный чат + сохранение истории ---
-    try:
+    # Save user message to history early
+    if text_raw:
         await add_message(user_id, "user", text_raw)
-    except Exception as e:
-        logger.warning(f"add_message user failed: {e}")
 
+    facts = await get_all_facts(user_id)
+    missing = _profile_missing(facts)
+
+    # Greeting shortcut
+    if any(x in text_low for x in ["привет", "здравств", "hello", "hi", "ahoj", "čau"]):
+        if facts.get("name"):
+            await message.answer(f"Привет, {facts.get('name')} 🙂")
+        else:
+            await message.answer("Привет 🙂")
+        if missing:
+            await _ask_next_question(message, user_language, facts)
+        return
+
+    # ---------------- ONBOARDING FLOW ----------------
+    if missing:
+        # 1) Name
+        if missing == "name":
+            name = text_raw.split()[0][:30]
+            await set_facts(user_id, {"name": name})
+            await message.answer(f"Отлично, {name}! 🙂")
+            facts = await get_all_facts(user_id)
+            await _ask_next_question(message, user_language, facts)
+            return
+
+        # 2) Numbers (weight,height,age)
+        if missing in ("weight_kg", "height_cm", "age"):
+            triple = _extract_three_numbers(text_raw)
+            if not triple:
+                await message.answer("Не вижу 3 корректных числа. Напиши так: `114, 182, 49`")
+                return
+            w, h, a = triple
+            await set_facts(user_id, {"weight_kg": str(w), "height_cm": str(h), "age": str(a)})
+            await message.answer(f"Принято ✅ Вес {w} кг, рост {h} см, возраст {a}.")
+            facts = await get_all_facts(user_id)
+            await _ask_next_question(message, user_language, facts)
+            return
+
+        # 3) Goal
+        if missing == "goal":
+            goal = _goal_from_text(text_raw) or text_low
+            if goal not in ("похудеть", "набрать", "поддерживать"):
+                await message.answer("Напиши одним словом: похудеть / набрать / поддерживать")
+                return
+            await set_facts(user_id, {"goal": goal})
+            await message.answer("Ок ✅")
+            facts = await get_all_facts(user_id)
+            await _ask_next_question(message, user_language, facts)
+            return
+
+        # 4) Activity
+        if missing == "activity":
+            act = _activity_from_text(text_raw) or text_low
+            if act not in ("низкая", "средняя", "высокая"):
+                await message.answer("Ответь: низкая / средняя / высокая")
+                return
+            await set_facts(user_id, {"activity": act})
+            await message.answer("Супер ✅ Я всё запомнил. Теперь можешь писать вопросы или присылать фото еды.")
+            return
+
+    # ---------------- NORMAL CHAT (PROFILE READY) ----------------
     reply = await chat_reply(user_id, text_raw, user_language)
-
-    try:
-        await add_message(user_id, "assistant", reply)
-    except Exception as e:
-        logger.warning(f"add_message assistant failed: {e}")
-
     await message.answer(reply)
+    await add_message(user_id, "assistant", reply)
+
 
 async def main():
     logger.info("Starting Telegram Dietitian Bot...")
-    logger.info(f"Using {GPT_MODEL} for food analysis")
-
+    logger.info(f"Using {GPT_MODEL} for analysis/chat")
     await init_db()
+
     try:
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
-        await http_client.aclose()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
