@@ -304,7 +304,7 @@ async def cmd_help(message: Message):
         "/start — начать или продолжить\n"
         "reset — сбросить анкету и пройти заново\n\n"
         "💬 Можно:\n"
-        "- Задавать вопросы про питание\n"
+        "- Задавать вопросы про питание (текстом или 🎤 голосом)\n"
         "- Присылать фото еды для анализа\n"
         "- Просить план питания или тренировок"
     )
@@ -523,6 +523,62 @@ async def onboarding_activity(message: Message, state: FSMContext):
         f"Отлично. Теперь напиши, что именно нужно (план питания/калории/рацион), "
         f"или пришли фото еды для анализа. Удачи!"
     )
+
+
+# -------------------- voice handler --------------------
+@dp.message(F.voice)
+async def handle_voice(message: Message, state: FSMContext):
+    """Handle voice messages - convert to text with Whisper API"""
+    user_language = detect_language(message.from_user.language_code)
+    
+    status_msg = await message.answer("🎤 Слушаю голосовое сообщение...")
+
+    try:
+        # Download voice message
+        voice = message.voice
+        file = await bot.get_file(voice.file_id)
+        
+        buf = BytesIO()
+        await bot.download_file(file.file_path, destination=buf)
+        audio_bytes = buf.getvalue()
+        
+        # Save to temporary file (Whisper API needs file object)
+        buf.seek(0)
+        buf.name = "voice.ogg"  # Whisper accepts .ogg format
+        
+        # Transcribe with Whisper
+        transcription = await openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=buf,
+            language="ru"  # Can be auto-detected or set based on user_language
+        )
+        
+        recognized_text = transcription.text.strip()
+        
+        await status_msg.delete()
+        
+        if not recognized_text:
+            await message.answer("Не удалось распознать речь. Попробуй ещё раз 🙂")
+            return
+        
+        # Show what was recognized
+        await message.answer(f"📝 Распознал: \"{recognized_text}\"")
+        
+        # Process as normal text message
+        # Create a fake message object with recognized text
+        message.text = recognized_text
+        await handle_text(message, state)
+        
+    except Exception as e:
+        logger.error(f"Error handling voice: {e}", exc_info=True)
+        try:
+            await status_msg.delete()
+        except:
+            pass
+        await message.answer(
+            "Не смог обработать голосовое сообщение 😔\n"
+            "Попробуй ещё раз или напиши текстом!"
+        )
 
 
 # -------------------- photo handler --------------------
