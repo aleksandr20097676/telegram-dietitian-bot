@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiogram.fsm.storage.memory import MemoryStorage
+import httpx 
 from openai import AsyncOpenAI
 import aiofiles
 
@@ -28,7 +29,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+http_client = httpx.AsyncClient(timeout=60.0)
+
+openai_client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
+    http_client=http_client)
+
+
 
 # Initialize bot and dispatcher
 bot = Bot(token=TELEGRAM_TOKEN)
