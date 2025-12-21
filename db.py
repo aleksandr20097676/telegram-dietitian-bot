@@ -1,84 +1,177 @@
 import os
 import asyncpg
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Railway/PG могут давать разные переменные.
+# Главное: в WEB-сервисе должен быть DATABASE_URL (мы ниже всё равно подстрахуемся).
+def _get_database_url() -> str:
+    return (
+        os.getenv("DATABASE_URL", "").strip()
+        or os.getenv("DATABASE_PUBLIC_URL", "").strip()
+        or os.getenv("POSTGRES_URL", "").strip()
+        or os.getenv("POSTGRESQL_URL", "").strip()
+        or os.getenv("PGDATABASE_URL", "").strip()
+    )
+
+DATABASE_URL = _get_database_url()
 
 _pool: Optional[asyncpg.Pool] = None
 
-async def init_db():
+
+def _require_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("DB pool is not initialized. Call init_db() first.")
+    return _pool
+
+
+async def init_db() -> None:
+    """
+    Initialize asyncpg pool + create tables if not exist.
+    """
     global _pool
+
     if not DATABASE_URL:
-        raise ValueError("DATABASE_URL is not set")
+        raise ValueError("DATABASE_URL is not set (set it in Railway WEB service variables).")
 
     _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
 
-    async with _pool.acquire() as conn:
-        # Профиль пользователя
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        # 1) Профиль пользователя: хранит "последние" известные значения
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            language TEXT,
-            name TEXT,
-            goal TEXT,
-            height_cm INT,
-            weight_kg REAL,
-            activity TEXT,
-            created_at TIMESTAMPTZ DEFAULT now(),
-            updated_at TIMESTAMPTZ DEFAULT now()
+            user_id     BIGINT PRIMARY KEY,
+            username    TEXT,
+            first_name  TEXT,
+            language    TEXT,
+
+            -- то, что бот собирает по анкете:
+            name        TEXT,
+            age         INT,
+            goal        TEXT,
+            height_cm   INT,
+            weight_kg   REAL,
+            activity    TEXT,
+
+            created_at  TIMESTAMPTZ DEFAULT now(),
+            updated_at  TIMESTAMPTZ DEFAULT now()
         );
         """)
 
-        # История диалога (для контекста)
+        # 2) История диалога (контекст). Можно ограничивать лимитом в коде.
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
-            id BIGSERIAL PRIMARY KEY,
-            user_id BIGINT NOT NULL,
-            role TEXT NOT NULL,          -- 'user' or 'assistant'
-            content TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT now()
+            id          BIGSERIAL PRIMARY KEY,
+            user_id     BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            role        TEXT NOT NULL,     -- 'user' or 'assistant'
+            content     TEXT NOT NULL,
+            created_at  TIMESTAMPTZ DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);
         """)
 
+        # 3) Универсальные факты о пользователе (ключ-значение), всегда храним последнее
+        # Примеры ключей: "work", "diet", "allergy", "target_weight", "city" и т.д.
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_facts (
+            user_id     BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            key         TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            updated_at  TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY (user_id, key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_facts_user_id ON user_facts(user_id);
+        """)
+
+
+# -----------------------
+# Users (profile)
+# -----------------------
+
 async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
-    async with _pool.acquire() as conn:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
         return dict(row) if row else None
 
-async def upsert_user(user_id: int, **fields):
-    # fields: name, goal, height_cm, weight_kg, activity, language, etc.
-    set_parts = []
-    values = [user_id]
-    i = 2
-    for k, v in fields.items():
-        set_parts.append(f"{k}=${i}")
-        values.append(v)
-        i += 1
 
-    # updated_at
-    set_parts.append("updated_at=now()")
+async def ensure_user(
+    user_id: int,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
+    language: Optional[str] = None
+) -> None:
+    """
+    Create user row if it doesn't exist, and update basic telegram fields.
+    """
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users (user_id, username, first_name, language)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username   = COALESCE(EXCLUDED.username, users.username),
+                first_name = COALESCE(EXCLUDED.first_name, users.first_name),
+                language   = COALESCE(EXCLUDED.language, users.language),
+                updated_at = now();
+        """, user_id, username, first_name, language)
 
-    set_sql = ", ".join(set_parts)
 
-    async with _pool.acquire() as conn:
-        await conn.execute(f"""
-        INSERT INTO users (user_id)
-        VALUES ($1)
-        ON CONFLICT (user_id) DO UPDATE SET {set_sql};
-        """, *values)
+async def upsert_user(user_id: int, **fields: Any) -> None:
+    """
+    Upsert any profile fields into users, keeping the latest value.
+    Example: upsert_user(user_id, goal="похудеть", weight_kg=112.5)
+    """
+    if not fields:
+        return
 
-async def add_message(user_id: int, role: str, content: str):
-    async with _pool.acquire() as conn:
+    allowed = {
+        "username", "first_name", "language",
+        "name", "age", "goal", "height_cm", "weight_kg", "activity",
+    }
+
+    clean_fields = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not clean_fields:
+        return
+
+    cols = list(clean_fields.keys())
+    vals = list(clean_fields.values())
+
+    # строим INSERT(user_id, col1, col2...) VALUES($1, $2...)
+    insert_cols = ["user_id"] + cols
+    placeholders = [f"${i}" for i in range(1, len(insert_cols) + 1)]
+
+    # ON CONFLICT: обновляем только те поля, что пришли
+    set_sql = ", ".join([f"{c}=EXCLUDED.{c}" for c in cols] + ["updated_at=now()"])
+
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"""
+            INSERT INTO users ({", ".join(insert_cols)})
+            VALUES ({", ".join(placeholders)})
+            ON CONFLICT (user_id) DO UPDATE SET {set_sql};
+            """,
+            user_id, *vals
+        )
+
+
+# -----------------------
+# Messages (history)
+# -----------------------
+
+async def add_message(user_id: int, role: str, content: str) -> None:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO messages (user_id, role, content) VALUES ($1, $2, $3)",
             user_id, role, content
         )
 
+
 async def get_recent_messages(user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
-    async with _pool.acquire() as conn:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT role, content
             FROM messages
@@ -87,6 +180,101 @@ async def get_recent_messages(user_id: int, limit: int = 20) -> List[Dict[str, A
             LIMIT $2
         """, user_id, limit)
 
-    # Вернем в правильном порядке (старые -> новые)
     rows = list(reversed(rows))
     return [{"role": r["role"], "content": r["content"]} for r in rows]
+
+
+async def trim_messages(user_id: int, keep_last: int = 60) -> None:
+    """
+    Optional: keep only last N messages per user (чтобы база не разрасталась).
+    """
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM messages
+            WHERE user_id = $1
+              AND id NOT IN (
+                  SELECT id FROM messages
+                  WHERE user_id = $1
+                  ORDER BY id DESC
+                  LIMIT $2
+              );
+        """, user_id, keep_last)
+
+
+# -----------------------
+# Facts (memory key/value)
+# -----------------------
+
+async def set_fact(user_id: int, key: str, value: str) -> None:
+    """
+    Save/overwrite a single fact. Always keeps last value.
+    """
+    key = key.strip().lower()
+    value = value.strip()
+
+    if not key or not value:
+        return
+
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_facts (user_id, key, value)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, key) DO UPDATE SET
+                value = EXCLUDED.value,
+                updated_at = now();
+        """, user_id, key, value)
+
+
+async def set_facts(user_id: int, facts: Dict[str, str]) -> None:
+    """
+    Save multiple facts in one transaction.
+    """
+    if not facts:
+        return
+
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for k, v in facts.items():
+                if k is None or v is None:
+                    continue
+                k2 = str(k).strip().lower()
+                v2 = str(v).strip()
+                if not k2 or not v2:
+                    continue
+                await conn.execute("""
+                    INSERT INTO user_facts (user_id, key, value)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (user_id, key) DO UPDATE SET
+                        value = EXCLUDED.value,
+                        updated_at = now();
+                """, user_id, k2, v2)
+
+
+async def get_fact(user_id: int, key: str) -> Optional[str]:
+    key = key.strip().lower()
+    if not key:
+        return None
+
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT value FROM user_facts
+            WHERE user_id=$1 AND key=$2
+        """, user_id, key)
+        return row["value"] if row else None
+
+
+async def get_all_facts(user_id: int) -> Dict[str, str]:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT key, value
+            FROM user_facts
+            WHERE user_id=$1
+            ORDER BY key ASC
+        """, user_id)
+
+    return {r["key"]: r["value"] for r in rows}
