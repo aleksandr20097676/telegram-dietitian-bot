@@ -102,6 +102,49 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
     except Exception as e:
         logger.error(f"Error analyzing photo: {e}")
         return get_text(user_language, 'error_analysis')
+  async def chat_reply(user_text: str, user_language: str) -> str:
+    """
+    Simple conversational reply (no photo). Uses GPT model from config.
+    """
+    try:
+        system_ru = (
+            "Ты дружелюбный и умный диетолог. Общайся как человек: "
+            "задай 1-2 уточняющих вопроса, предложи план, отвечай коротко и по делу. "
+            "Если человек хочет — попроси рост/вес/цель/активность. "
+            "Если уместно — предложи прислать фото еды для точного подсчёта."
+        )
+        system_cs = (
+            "Jsi přátelský a chytrý dietolog. Mluv jako člověk: "
+            "polož 1–2 doplňující otázky, navrhni plán, odpovídej stručně a věcně. "
+            "Když je to potřeba, zeptej se na výšku/váhu/cíl/aktivitu. "
+            "Když se hodí, nabídni poslat fotku jídla pro přesnější výpočet."
+        )
+        system_en = (
+            "You are a friendly and smart dietitian. Talk like a human: "
+            "ask 1–2 clarifying questions, suggest a plan, keep it concise and useful. "
+            "If needed, ask height/weight/goal/activity. "
+            "If relevant, suggest sending a food photo for accurate calculation."
+        )
+
+        system_map = {"ru": system_ru, "cs": system_cs, "en": system_en}
+        system_prompt = system_map.get(user_language, system_en)
+
+        resp = await openai_client.chat.completions.create(
+            model=GPT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text},
+            ],
+            max_tokens=400,
+            temperature=0.7,
+        )
+
+        return resp.choices[0].message.content.strip()
+
+    except Exception as e:
+        logger.error(f"Error in chat_reply: {e}")
+        return get_text(user_language, "error_general")
+      
 
 
 @dp.message(Command("start"))
