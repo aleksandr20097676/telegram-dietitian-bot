@@ -3,10 +3,10 @@
 Telegram Dietitian Bot - Photo Food Analysis + Onboarding (saved to DB)
 
 ИСПРАВЛЕНО:
-- System prompt для фото анализа - более мягкий и эффективный
+- Убран raise StopIteration который крашил бота!
+- Правильная логика обработки reset команды
+- System prompt для фото анализа - мягкий и эффективный
 - Парсинг активности и работы исправлен
-- Упрощена логика обработки сообщений
-- Сохранен весь диалог онбординга как в скринах
 """
 
 import asyncio
@@ -127,7 +127,7 @@ async def profile_missing(user_id: int) -> Optional[str]:
 async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
     """
     Vision analysis for food photo.
-    ИСПРАВЛЕНО: Более мягкий system prompt который не блокирует анализ.
+    ВАЖНО: GPT_MODEL должен поддерживать vision (например gpt-4o).
     """
     try:
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
@@ -144,7 +144,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
             )
             count += 1
 
-        # ✅ ИСПРАВЛЕННЫЙ system prompt - позитивный и конкретный
+        # ✅ ПРАВИЛЬНЫЙ system prompt - позитивный и конкретный
         system_prompt = (
             "Ты опытный диетолог-нутрициолог. Твоя задача - помочь пользователю понять "
             "питательную ценность еды на фотографии.\n\n"
@@ -310,38 +310,219 @@ async def cmd_help(message: Message):
     )
 
 
-# -------------------- reset handler --------------------
-@dp.message(F.text)
-async def check_reset(message: Message, state: FSMContext, skip_handlers: list = []):
-    """
-    Check for reset command FIRST before any other text processing.
-    Uses handler priority to run first.
-    """
-    if not message.text or not is_reset_command(message.text):
-        return  # Not a reset, continue to other handlers
+# -------------------- onboarding: name --------------------
+@dp.message(Onboarding.waiting_name, F.text)
+async def onboarding_name(message: Message, state: FSMContext):
+    """Collect user name"""
+    # Check for reset command
+    if is_reset_command(message.text):
+        user_id = message.from_user.id
+        await set_facts(user_id, {
+            "name": "",
+            "goal": "",
+            "weight_kg": "",
+            "height_cm": "",
+            "age": "",
+            "activity": "",
+            "job": "",
+        })
+        await state.clear()
+        await message.answer(
+            "✅ Анкету сбросил!\n"
+            "Напиши /start чтобы пройти заново."
+        )
+        return
     
-    # User wants to reset
     user_id = message.from_user.id
+    name = normalize_text(message.text)
     
-    # Wipe profile data
-    await set_facts(user_id, {
-        "name": "",
-        "goal": "",
-        "weight_kg": "",
-        "height_cm": "",
-        "age": "",
-        "activity": "",
-        "job": "",
-    })
+    if len(name) < 2 or len(name) > 30:
+        await message.answer("Напиши, пожалуйста, только имя (2–30 символов).")
+        return
+
+    await set_fact(user_id, "name", name)
     
-    await state.clear()
     await message.answer(
-        "✅ Анкету сбросил!\n"
-        "Напиши /start чтобы пройти заново."
+        f"Отлично, {name}! Какая цель?\n"
+        "1) Похудеть\n"
+        "2) Набрать\n"
+        "3) Удержание\n\n"
+        "Можно просто написать: похудеть / набрать / удержание"
+    )
+    await state.set_state(Onboarding.waiting_goal)
+
+
+# -------------------- onboarding: goal --------------------
+@dp.message(Onboarding.waiting_goal, F.text)
+async def onboarding_goal(message: Message, state: FSMContext):
+    """Collect user goal"""
+    # Check for reset
+    if is_reset_command(message.text):
+        user_id = message.from_user.id
+        await set_facts(user_id, {
+            "name": "",
+            "goal": "",
+            "weight_kg": "",
+            "height_cm": "",
+            "age": "",
+            "activity": "",
+            "job": "",
+        })
+        await state.clear()
+        await message.answer(
+            "✅ Анкету сбросил!\n"
+            "Напиши /start чтобы пройти заново."
+        )
+        return
+    
+    user_id = message.from_user.id
+    goal = normalize_text(message.text).lower()
+
+    # Normalize goal
+    if "пох" in goal or goal == "1":
+        goal_norm = "похудеть"
+    elif "удерж" in goal or "поддерж" in goal or goal == "3":
+        goal_norm = "поддерживать"
+    elif "наб" in goal or "мыш" in goal or goal == "2":
+        goal_norm = "набрать мышечную массу"
+    else:
+        goal_norm = normalize_text(message.text)
+
+    await set_fact(user_id, "goal", goal_norm)
+
+    await message.answer(
+        "Отлично, что вы решили заняться собой! "
+        "Можете рассказать мне немного о своём росте, весе, уровне физической активности "
+        "и какой результат хотите достичь? Это поможет составить более точный план."
     )
     
-    # Stop propagation to other handlers
-    raise StopIteration
+    await message.answer(
+        "Напишите одним сообщением: вес (кг), рост (см), возраст. "
+        "Например: вес 114 рост 182 возраст 49"
+    )
+    
+    await state.set_state(Onboarding.waiting_whA)
+
+
+# -------------------- onboarding: weight/height/age --------------------
+@dp.message(Onboarding.waiting_whA, F.text)
+async def onboarding_wha(message: Message, state: FSMContext):
+    """Collect weight, height, age"""
+    # Check for reset
+    if is_reset_command(message.text):
+        user_id = message.from_user.id
+        await set_facts(user_id, {
+            "name": "",
+            "goal": "",
+            "weight_kg": "",
+            "height_cm": "",
+            "age": "",
+            "activity": "",
+            "job": "",
+        })
+        await state.clear()
+        await message.answer(
+            "✅ Анкету сбросил!\n"
+            "Напиши /start чтобы пройти заново."
+        )
+        return
+    
+    user_id = message.from_user.id
+    parsed = parse_weight_height_age(message.text)
+    
+    if parsed is None:
+        await message.answer(
+            "Не вижу: возраст. Напишите ещё раз одним сообщением."
+        )
+        return
+
+    w, h, a = parsed
+    await set_facts(user_id, {
+        "weight_kg": str(w),
+        "height_cm": str(h),
+        "age": str(a),
+    })
+
+    await message.answer(
+        "Какую цель вы хотите достичь: снизить вес, поддерживать текущий "
+        "или набрать? Также расскажите немного о вашей физической активности."
+    )
+    
+    await message.answer(
+        "Какая у тебя активность? (низкая / средняя / высокая) "
+        "и чем занимаешься (работа)?"
+    )
+    
+    await state.set_state(Onboarding.waiting_activity)
+
+
+# -------------------- onboarding: activity --------------------
+@dp.message(Onboarding.waiting_activity, F.text)
+async def onboarding_activity(message: Message, state: FSMContext):
+    """Collect activity level and job"""
+    # Check for reset
+    if is_reset_command(message.text):
+        user_id = message.from_user.id
+        await set_facts(user_id, {
+            "name": "",
+            "goal": "",
+            "weight_kg": "",
+            "height_cm": "",
+            "age": "",
+            "activity": "",
+            "job": "",
+        })
+        await state.clear()
+        await message.answer(
+            "✅ Анкету сбросил!\n"
+            "Напиши /start чтобы пройти заново."
+        )
+        return
+    
+    user_id = message.from_user.id
+    text = normalize_text(message.text)
+
+    # ✅ ИСПРАВЛЕН парсинг активности и работы
+    t = text.lower()
+    activity = ""
+    job = ""
+    
+    # Detect activity level
+    if "низ" in t:
+        activity = "низкая"
+    elif "сред" in t:
+        activity = "средняя"
+    elif "выс" in t:
+        activity = "высокая"
+    
+    # Extract job - everything after comma or after activity word
+    if "," in text:
+        parts = text.split(",", 1)
+        if not activity:
+            activity = parts[0].strip()
+        job = parts[1].strip()
+    else:
+        # Try to find job after activity keywords
+        job_match = re.sub(r'(низкая|средняя|высокая)', '', t, flags=re.IGNORECASE).strip()
+        job = job_match if job_match else ""
+        
+        if not activity:
+            # If no activity detected, use first word as activity
+            activity = text.split()[0] if text.split() else "средняя"
+
+    await set_facts(user_id, {
+        "activity": activity or "средняя",
+        "job": job,
+    })
+
+    name = await get_fact(user_id, "name") or ""
+    
+    await state.clear()
+    
+    await message.answer(
+        f"Отлично. Теперь напиши, что именно нужно (план питания/калории/рацион), "
+        f"или пришли фото еды для анализа. Удачи!"
+    )
 
 
 # -------------------- photo handler --------------------
@@ -397,163 +578,28 @@ async def handle_photo(message: Message, state: FSMContext):
         )
 
 
-# -------------------- onboarding: name --------------------
-@dp.message(Onboarding.waiting_name, F.text)
-async def onboarding_name(message: Message, state: FSMContext):
-    """Collect user name"""
-    if is_reset_command(message.text):
-        return  # Let reset handler deal with it
-    
-    user_id = message.from_user.id
-    name = normalize_text(message.text)
-    
-    if len(name) < 2 or len(name) > 30:
-        await message.answer("Напиши, пожалуйста, только имя (2–30 символов).")
-        return
-
-    await set_fact(user_id, "name", name)
-    
-    await message.answer(
-        f"Отлично, {name}! Какая цель?\n"
-        "1) Похудеть\n"
-        "2) Набрать\n"
-        "3) Удержание\n\n"
-        "Можно просто написать: похудеть / набрать / удержание"
-    )
-    await state.set_state(Onboarding.waiting_goal)
-
-
-# -------------------- onboarding: goal --------------------
-@dp.message(Onboarding.waiting_goal, F.text)
-async def onboarding_goal(message: Message, state: FSMContext):
-    """Collect user goal"""
-    if is_reset_command(message.text):
-        return
-    
-    user_id = message.from_user.id
-    goal = normalize_text(message.text).lower()
-
-    # Normalize goal
-    if "пох" in goal or goal == "1":
-        goal_norm = "похудеть"
-    elif "удерж" in goal or "поддерж" in goal or goal == "3":
-        goal_norm = "поддерживать"
-    elif "наб" in goal or "мыш" in goal or goal == "2":
-        goal_norm = "набрать мышечную массу"
-    else:
-        goal_norm = normalize_text(message.text)
-
-    await set_fact(user_id, "goal", goal_norm)
-
-    await message.answer(
-        "Отлично, что вы решили заняться собой! "
-        "Можете рассказать мне немного о своём росте, весе, уровне физической активности "
-        "и какой результат хотите достичь? Это поможет составить более точный план."
-    )
-    
-    await message.answer(
-        "Напишите одним сообщением: вес (кг), рост (см), возраст. "
-        "Например: вес 114 рост 182 возраст 49"
-    )
-    
-    await state.set_state(Onboarding.waiting_whA)
-
-
-# -------------------- onboarding: weight/height/age --------------------
-@dp.message(Onboarding.waiting_whA, F.text)
-async def onboarding_wha(message: Message, state: FSMContext):
-    """Collect weight, height, age"""
-    if is_reset_command(message.text):
-        return
-    
-    user_id = message.from_user.id
-    parsed = parse_weight_height_age(message.text)
-    
-    if parsed is None:
-        await message.answer(
-            "Не вижу: возраст. Напишите ещё раз одним сообщением."
-        )
-        return
-
-    w, h, a = parsed
-    await set_facts(user_id, {
-        "weight_kg": str(w),
-        "height_cm": str(h),
-        "age": str(a),
-    })
-
-    await message.answer(
-        "Какую цель вы хотите достичь: снизить вес, поддерживать текущий "
-        "или набрать? Также расскажите немного о вашей физической активности."
-    )
-    
-    await message.answer(
-        "Какая у тебя активность? (низкая / средняя / высокая) "
-        "и чем занимаешься (работа)?"
-    )
-    
-    await state.set_state(Onboarding.waiting_activity)
-
-
-# -------------------- onboarding: activity --------------------
-@dp.message(Onboarding.waiting_activity, F.text)
-async def onboarding_activity(message: Message, state: FSMContext):
-    """Collect activity level and job"""
-    if is_reset_command(message.text):
-        return
-    
-    user_id = message.from_user.id
-    text = normalize_text(message.text)
-
-    # ✅ ИСПРАВЛЕН парсинг активности и работы
-    t = text.lower()
-    activity = ""
-    job = ""
-    
-    # Detect activity level
-    if "низ" in t:
-        activity = "низкая"
-    elif "сред" in t:
-        activity = "средняя"
-    elif "выс" in t:
-        activity = "высокая"
-    
-    # Extract job - everything after comma or after activity word
-    if "," in text:
-        parts = text.split(",", 1)
-        if not activity:
-            activity = parts[0].strip()
-        job = parts[1].strip()
-    else:
-        # Try to find job after activity keywords
-        job_match = re.sub(r'(низкая|средняя|высокая)', '', t, flags=re.IGNORECASE).strip()
-        job = job_match if job_match else ""
-        
-        if not activity:
-            # If no activity detected, use first word as activity
-            activity = text.split()[0] if text.split() else "средняя"
-
-    await set_facts(user_id, {
-        "activity": activity or "средняя",
-        "job": job,
-    })
-
-    name = await get_fact(user_id, "name") or ""
-    
-    await state.clear()
-    
-    await message.answer(
-        f"Отлично. Теперь напиши, что именно нужно (план питания/калории/рацион), "
-        f"или пришли фото еды для анализа. Удачи!"
-    )
-
-
 # -------------------- default text handler --------------------
 @dp.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
     """Handle all other text messages"""
+    # Check for reset command FIRST
     if is_reset_command(message.text):
-        return  # Already handled by reset handler
+        user_id = message.from_user.id
+        await set_facts(user_id, {
+            "name": "",
+            "goal": "",
+            "weight_kg": "",
+            "height_cm": "",
+            "age": "",
+            "activity": "",
+            "job": "",
+        })
+        await state.clear()
+        await message.answer(
+            "✅ Анкету сбросил!\n"
+            "Напиши /start чтобы пройти заново."
+        )
+        return
     
     user_language = detect_language(message.from_user.language_code)
     user_id = message.from_user.id
