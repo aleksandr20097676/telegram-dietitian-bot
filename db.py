@@ -206,6 +206,18 @@ async def trim_messages(user_id: int, keep_last: int = 60) -> None:
 # Facts (memory key/value)
 # -----------------------
 
+async def ensure_user_exists(user_id: int) -> None:
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO users (id, created_at)
+            VALUES ($1, now())
+            ON CONFLICT (id) DO NOTHING;
+            """,
+            user_id,
+        )
+
 async def set_fact(user_id: int, key: str, value: str) -> None:
     """
     Save/overwrite a single fact. Always keeps last value.
