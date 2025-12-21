@@ -102,7 +102,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
     except Exception as e:
         logger.error(f"Error analyzing photo: {e}")
         return get_text(user_language, 'error_analysis')
-    async def chat_reply(user_text: str, user_language: str) -> str:
+async def chat_reply(user_text: str, user_language: str) -> str:
     """
     Simple conversational reply (no photo). Uses GPT model from config.
     """
