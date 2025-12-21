@@ -146,7 +146,7 @@ Buď přesný a konkrétní ve výpočtech!""",
 {db_description}
 
 Be precise and specific in calculations!"""
-    }
+    },
     "greeting": {
     "ru": "Привет! 😊 Как дела? Я твой AI-диетолог. Хочешь похудеть, набрать форму или просто разобраться с питанием?",
     "cs": "Ahoj! 😊 Jak se máš? Jsem tvůj AI dietolog. Chceš zhubnout, zlepšit formu nebo se jen poradit o jídle?",
