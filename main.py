@@ -530,6 +530,7 @@ async def onboarding_activity(message: Message, state: FSMContext):
 async def handle_voice(message: Message, state: FSMContext):
     """Handle voice messages - convert to text with Whisper API"""
     user_language = detect_language(message.from_user.language_code)
+    user_id = message.from_user.id
     
     status_msg = await message.answer("🎤 Слушаю голосовое сообщение...")
 
@@ -564,10 +565,132 @@ async def handle_voice(message: Message, state: FSMContext):
         # Show what was recognized
         await message.answer(f"📝 Распознал: \"{recognized_text}\"")
         
-        # Process as normal text message
-        # Create a fake message object with recognized text
-        message.text = recognized_text
-        await handle_text(message, state)
+        # ✅ ИСПРАВЛЕНО: Обрабатываем распознанный текст напрямую
+        # Check for reset command
+        if is_reset_command(recognized_text):
+            await set_facts(user_id, {
+                "name": "",
+                "goal": "",
+                "weight_kg": "",
+                "height_cm": "",
+                "age": "",
+                "activity": "",
+                "job": "",
+            })
+            await state.clear()
+            await message.answer(
+                "✅ Анкету сбросил!\n"
+                "Напиши /start чтобы пройти заново."
+            )
+            return
+        
+        # Get current state
+        current_state = await state.get_state()
+        
+        # If in onboarding state, handle accordingly
+        if current_state == Onboarding.waiting_name.state:
+            name = normalize_text(recognized_text)
+            if len(name) < 2 or len(name) > 30:
+                await message.answer("Напиши, пожалуйста, только имя (2–30 символов).")
+                return
+            await set_fact(user_id, "name", name)
+            await message.answer(
+                f"Отлично, {name}! Какая цель?\n"
+                "1) Похудеть\n"
+                "2) Набрать\n"
+                "3) Удержание"
+            )
+            await state.set_state(Onboarding.waiting_goal)
+            return
+            
+        elif current_state == Onboarding.waiting_goal.state:
+            goal = normalize_text(recognized_text).lower()
+            if "пох" in goal or goal == "1":
+                goal_norm = "похудеть"
+            elif "удерж" in goal or "поддерж" in goal or goal == "3":
+                goal_norm = "поддерживать"
+            elif "наб" in goal or "мыш" in goal or goal == "2":
+                goal_norm = "набрать мышечную массу"
+            else:
+                goal_norm = normalize_text(recognized_text)
+            await set_fact(user_id, "goal", goal_norm)
+            await message.answer("Напишите одним сообщением: вес (кг), рост (см), возраст.")
+            await state.set_state(Onboarding.waiting_whA)
+            return
+            
+        elif current_state == Onboarding.waiting_whA.state:
+            parsed = parse_weight_height_age(recognized_text)
+            if parsed is None:
+                await message.answer("Не вижу: возраст. Напишите ещё раз.")
+                return
+            w, h, a = parsed
+            await set_facts(user_id, {
+                "weight_kg": str(w),
+                "height_cm": str(h),
+                "age": str(a),
+            })
+            await message.answer("Какая у тебя активность? (низкая / средняя / высокая) и чем занимаешься?")
+            await state.set_state(Onboarding.waiting_activity)
+            return
+            
+        elif current_state == Onboarding.waiting_activity.state:
+            text = normalize_text(recognized_text)
+            t = text.lower()
+            activity = ""
+            job = ""
+            
+            if "низ" in t:
+                activity = "низкая"
+            elif "сред" in t:
+                activity = "средняя"
+            elif "выс" in t:
+                activity = "высокая"
+            
+            if "," in text:
+                parts = text.split(",", 1)
+                if not activity:
+                    activity = parts[0].strip()
+                job = parts[1].strip()
+            else:
+                job_match = re.sub(r'(низкая|средняя|высокая)', '', t, flags=re.IGNORECASE).strip()
+                job = job_match if job_match else ""
+                if not activity:
+                    activity = text.split()[0] if text.split() else "средняя"
+            
+            await set_facts(user_id, {
+                "activity": activity or "средняя",
+                "job": job,
+            })
+            await state.clear()
+            await message.answer("Отлично. Теперь напиши, что нужно, или пришли фото еды!")
+            return
+        
+        # Not in onboarding - ensure profile complete
+        missing = await profile_missing(user_id)
+        if missing is not None:
+            await message.answer(missing)
+            if "как тебя зовут" in missing.lower():
+                await state.set_state(Onboarding.waiting_name)
+            elif "какая цель" in missing.lower():
+                await state.set_state(Onboarding.waiting_goal)
+            elif "вес, рост, возраст" in missing.lower():
+                await state.set_state(Onboarding.waiting_whA)
+            else:
+                await state.set_state(Onboarding.waiting_activity)
+            return
+        
+        # Quick greetings
+        low = recognized_text.lower()
+        if any(x in low for x in ["привет", "здрав", "hello", "hi"]):
+            name = await get_fact(user_id, "name") or "друг"
+            await message.answer(
+                f"Привет, {name}! 😊 Как дела? Чем помочь?"
+            )
+            return
+        
+        # Normal chat with GPT
+        reply = await chat_reply(recognized_text, user_language, user_id)
+        await message.answer(reply)
         
     except Exception as e:
         logger.error(f"Error handling voice: {e}", exc_info=True)
