@@ -211,12 +211,13 @@ async def ensure_user_exists(user_id: int) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO users (id, created_at)
-            VALUES ($1, now())
-            ON CONFLICT (id) DO NOTHING;
+            INSERT INTO users (user_id)
+            VALUES ($1)
+            ON CONFLICT (user_id) DO NOTHING;
             """,
             user_id,
         )
+
 
 async def set_fact(user_id: int, key: str, value: str) -> None:
     """
