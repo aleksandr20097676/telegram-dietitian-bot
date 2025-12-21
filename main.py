@@ -149,10 +149,18 @@ async def handle_photo(message: Message):
 
 
 @dp.message()
+@dp.message()
 async def handle_text(message: Message):
-    """Handle text messages"""
     user_language = detect_language(message.from_user.language_code)
-    await message.answer(get_text(user_language, 'send_photo'))
+    text = (message.text or "").strip().lower()
+
+    greetings = ["привет", "здравств", "hello", "hi", "ahoj", "čau"]
+    if any(g in text for g in greetings):
+        await message.answer(get_text(user_language, "greeting"))
+        return
+
+    reply = await chat_reply(message.text, user_language)
+    await message.answer(reply)
 
 
 async def main():
