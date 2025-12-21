@@ -33,7 +33,7 @@ from database import FOOD_DATABASE
 from languages import detect_language, get_text
 
 # db.py functions
-from db import init_db, set_fact, set_facts, get_fact
+from db import init_db, ensure_user_exists, set_fact, set_facts, get_fact
 
 
 # -------------------- logging --------------------
@@ -317,6 +317,7 @@ async def onboarding_name(message: Message, state: FSMContext):
     # Check for reset command
     if is_reset_command(message.text):
         user_id = message.from_user.id
+        await ensure_user_exists(user_id)
         await set_facts(user_id, {
             "name": "",
             "goal": "",
@@ -334,6 +335,7 @@ async def onboarding_name(message: Message, state: FSMContext):
         return
     
     user_id = message.from_user.id
+    await ensure_user_exists(user_id)
     name = normalize_text(message.text)
     
     if len(name) < 2 or len(name) > 30:
