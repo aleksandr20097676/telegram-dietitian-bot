@@ -20,6 +20,7 @@ import aiofiles
 from config import TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL
 from database import FOOD_DATABASE
 from languages import TEXTS, detect_language, get_text
+from db import init_db, get_user, upsert_user, add_message, get_recent_messages
 
 # Configure logging
 logging.basicConfig(
