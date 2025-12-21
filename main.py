@@ -212,6 +212,8 @@ async def main():
     logger.info("Starting Telegram Dietitian Bot...")
     logger.info(f"Using {GPT_MODEL} for food analysis")
     
+    await init_db()
+
     try:
         # Start polling
         await dp.start_polling(bot)
