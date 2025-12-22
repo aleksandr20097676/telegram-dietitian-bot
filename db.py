@@ -1,4 +1,3 @@
-
 import os
 import asyncpg
 from typing import Optional, Dict, Any, List, Tuple
@@ -126,6 +125,10 @@ async def ensure_user(
                 language   = COALESCE(EXCLUDED.language, users.language),
                 updated_at = now();
         """, user_id, username, first_name, language)
+
+
+# ✅ ИСПРАВЛЕНИЕ: Алиас для совместимости с main.py
+ensure_user_exists = ensure_user
 
 
 async def upsert_user(user_id: int, **fields: Any) -> None:
