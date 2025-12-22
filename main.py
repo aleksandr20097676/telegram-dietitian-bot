@@ -142,9 +142,15 @@ def format_food_card(food_name: str, calories: int, protein: float, fat: float, 
     return card
 
 
-async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
-    """Vision analysis for food photo with beautiful card"""
+async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: int) -> str:
+    """Vision analysis for food photo with beautiful card and personalized recommendations"""
     try:
+        # Получаем профиль пользователя
+        name = await get_fact(user_id, "name") or "друг"
+        goal = await get_fact(user_id, "goal") or "поддерживать вес"
+        weight = await get_fact(user_id, "weight_kg") or "?"
+        activity = await get_fact(user_id, "activity") or "средняя"
+        
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
         db_description = "Примеры из базы продуктов:\n"
@@ -159,28 +165,37 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
             count += 1
 
         system_prompt = (
-            "Ты опытный диетолог-нутрициолог. Анализируй еду на фото.\n\n"
-            "ФОРМАТ ОТВЕТА:\n"
-            "1. Название блюда (одно слово или фраза)\n"
-            "2. Вес порции в граммах\n"
-            "3. Калории (только число)\n"
-            "4. Белки в граммах (только число)\n"
-            "5. Жиры в граммах (только число)\n"
-            "6. Углеводы в граммах (только число)\n"
-            "7. Краткий комментарий (1-2 предложения)\n\n"
-            "Если на фото нет еды - сразу скажи что это не еда."
+            f"Ты опытный диетолог-нутрициолог. Анализируешь еду на фото.\n\n"
+            f"ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:\n"
+            f"- Имя: {name}\n"
+            f"- Цель: {goal}\n"
+            f"- Текущий вес: {weight} кг\n"
+            f"- Активность: {activity}\n\n"
+            f"ФОРМАТ ОТВЕТА:\n"
+            f"1. Название блюда (одно слово или фраза)\n"
+            f"2. Вес порции в граммах\n"
+            f"3. Калории (только число)\n"
+            f"4. Белки в граммах (только число)\n"
+            f"5. Жиры в граммах (только число)\n"
+            f"6. Углеводы в граммах (только число)\n"
+            f"7. РЕКОМЕНДАЦИИ (2-4 предложения):\n"
+            f"   - Подходит ли это блюдо для цели пользователя?\n"
+            f"   - Что хорошо в этом блюде?\n"
+            f"   - Что можно улучшить?\n"
+            f"   - Конкретные советы (уменьшить/добавить что-то, тренировки и т.д.)\n\n"
+            f"Если на фото нет еды - сразу скажи что это не еда."
         )
 
         user_prompt = (
             f"{db_description}\n\n"
-            "Проанализируй фото и ответь СТРОГО в формате:\n"
-            "БЛЮДО: название\n"
-            "ВЕС: число\n"
-            "КАЛОРИИ: число\n"
-            "БЕЛКИ: число\n"
-            "ЖИРЫ: число\n"
-            "УГЛЕВОДЫ: число\n"
-            "КОММЕНТАРИЙ: текст"
+            f"Проанализируй фото и ответь СТРОГО в формате:\n"
+            f"БЛЮДО: название\n"
+            f"ВЕС: число\n"
+            f"КАЛОРИИ: число\n"
+            f"БЕЛКИ: число\n"
+            f"ЖИРЫ: число\n"
+            f"УГЛЕВОДЫ: число\n"
+            f"РЕКОМЕНДАЦИИ: текст с учётом цели '{goal}'"
         )
 
         resp = await openai_client.chat.completions.create(
@@ -198,8 +213,8 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
                     ],
                 },
             ],
-            max_tokens=1000,
-            temperature=0.3,
+            max_tokens=1200,
+            temperature=0.5,
         )
 
         result = (resp.choices[0].message.content or "").strip()
@@ -215,7 +230,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
         protein = 0.0
         fat = 0.0
         carbs = 0.0
-        comment = ""
+        recommendations = ""
         
         for line in lines:
             line_lower = line.lower()
@@ -241,15 +256,29 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
                 nums = re.findall(r'\d+\.?\d*', line)
                 if nums:
                     carbs = float(nums[0])
-            elif 'комментарий:' in line_lower or 'comment:' in line_lower:
-                comment = line.split(':', 1)[1].strip()
+            elif 'рекоменд' in line_lower or 'recommend' in line_lower:
+                recommendations = line.split(':', 1)[1].strip() if ':' in line else ""
+        
+        # Собираем оставшиеся строки как рекомендации если не нашли
+        if not recommendations:
+            rec_started = False
+            rec_lines = []
+            for line in lines:
+                if 'рекоменд' in line.lower() or 'recommend' in line.lower():
+                    rec_started = True
+                    if ':' in line:
+                        rec_lines.append(line.split(':', 1)[1].strip())
+                    continue
+                if rec_started and line.strip():
+                    rec_lines.append(line.strip())
+            recommendations = ' '.join(rec_lines)
         
         # Создаём красивую карточку
         card = format_food_card(food_name, calories, protein, fat, carbs, weight)
         
-        # Добавляем комментарий если есть
-        if comment:
-            card += f"\n\n💡 {comment}"
+        # Добавляем персональные рекомендации
+        if recommendations:
+            card += f"\n\n💡 Рекомендации для твоей цели ({goal}):\n\n{recommendations}"
         
         return card
 
@@ -723,7 +752,7 @@ async def handle_photo(message: Message, state: FSMContext):
         await bot.download_file(file.file_path, destination=buf)
         photo_bytes = buf.getvalue()
 
-        result = await analyze_food_photo(photo_bytes, user_language)
+        result = await analyze_food_photo(photo_bytes, user_language, user_id)
         
         await status_msg.delete()
         await message.answer(result)
