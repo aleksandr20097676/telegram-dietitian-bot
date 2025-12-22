@@ -143,7 +143,7 @@ def format_food_card(food_name: str, calories: int, protein: float, fat: float, 
 
 
 async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: int) -> str:
-    """Vision analysis for food photo with beautiful card and personalized recommendations"""
+    """Vision analysis for food photo with beautiful card and friendly 50/50 recommendations"""
     try:
         # Получаем профиль пользователя
         name = await get_fact(user_id, "name") or "друг"
@@ -165,7 +165,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: in
             count += 1
 
         system_prompt = (
-            f"Ты опытный диетолог-нутрициолог. Анализируешь еду на фото.\n\n"
+            f"Ты дружелюбный AI-диетолог, который общается живо и с юмором.\n\n"
             f"ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:\n"
             f"- Имя: {name}\n"
             f"- Цель: {goal}\n"
@@ -178,12 +178,21 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: in
             f"4. Белки в граммах (только число)\n"
             f"5. Жиры в граммах (только число)\n"
             f"6. Углеводы в граммах (только число)\n"
-            f"7. РЕКОМЕНДАЦИИ (2-4 предложения):\n"
-            f"   - Подходит ли это блюдо для цели пользователя?\n"
-            f"   - Что хорошо в этом блюде?\n"
-            f"   - Что можно улучшить?\n"
-            f"   - Конкретные советы (уменьшить/добавить что-то, тренировки и т.д.)\n\n"
-            f"Если на фото нет еды - сразу скажи что это не еда."
+            f"7. ЖИВЫЕ РЕКОМЕНДАЦИИ (баланс 50/50: факты + дружелюбный тон):\n"
+            f"   - Используй эмодзи для оживления!\n"
+            f"   - Сначала дай ФАКТЫ с эмодзи (что хорошо ✅, что так себе ⚠️)\n"
+            f"   - Потом дай ДВА ВАРИАНТА действий:\n"
+            f"     1️⃣ Серьёзный (изменить блюдо)\n"
+            f"     2️⃣ Игривый (съесть всё, но компенсировать тренировкой)\n"
+            f"   - Закончи мотивирующей фразой с эмодзи\n"
+            f"   - Тон: дружелюбный, поддерживающий, чуть игривый\n"
+            f"   - НЕ используй формальное 'Вы', используй 'ты'\n\n"
+            f"ПРИМЕРЫ ХОРОШЕГО СТИЛЯ:\n"
+            f"'Эх, калорий многовато! 🤔'\n"
+            f"'Белка достаточно - супер! ✅'\n"
+            f"'Можешь: 1️⃣ Убрать половину порции ИЛИ 2️⃣ Пробежать 2км вечером! 😉'\n"
+            f"'Твой выбор, чемпион! 💪'\n\n"
+            f"Если на фото нет еды - скажи об этом дружелюбно."
         )
 
         user_prompt = (
@@ -195,7 +204,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: in
             f"БЕЛКИ: число\n"
             f"ЖИРЫ: число\n"
             f"УГЛЕВОДЫ: число\n"
-            f"РЕКОМЕНДАЦИИ: текст с учётом цели '{goal}'"
+            f"РЕКОМЕНДАЦИИ: [дружелюбный текст с фактами, двумя вариантами действий и мотивацией]"
         )
 
         resp = await openai_client.chat.completions.create(
@@ -214,7 +223,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: in
                 },
             ],
             max_tokens=1200,
-            temperature=0.5,
+            temperature=0.7,  # Повышаем температуру для более живых ответов
         )
 
         result = (resp.choices[0].message.content or "").strip()
@@ -271,14 +280,14 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str, user_id: in
                     continue
                 if rec_started and line.strip():
                     rec_lines.append(line.strip())
-            recommendations = ' '.join(rec_lines)
+            recommendations = '\n'.join(rec_lines)
         
         # Создаём красивую карточку
         card = format_food_card(food_name, calories, protein, fat, carbs, weight)
         
-        # Добавляем персональные рекомендации
+        # Добавляем живые рекомендации
         if recommendations:
-            card += f"\n\n💡 Рекомендации для твоей цели ({goal}):\n\n{recommendations}"
+            card += f"\n\n💡 Мой взгляд:\n\n{recommendations}"
         
         return card
 
@@ -732,7 +741,7 @@ async def handle_voice(message: Message, state: FSMContext):
 # -------------------- photo handler --------------------
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
-    """Handle photo messages - analyze food with beautiful card"""
+    """Handle photo messages - analyze food with beautiful card and emoji reactions"""
     user_language = detect_language(message.from_user.language_code)
     user_id = message.from_user.id
 
@@ -742,9 +751,16 @@ async def handle_photo(message: Message, state: FSMContext):
         await message.answer("Сначала давай познакомимся! 🙂 Напиши /start")
         return
 
-    status_msg = await message.answer("🔍 Анализирую фото...")
-
+    # Анимированные эмодзи-реакции
+    status_msg = await message.answer("🔍 Смотрю на твою еду...")
+    await asyncio.sleep(1)
+    
     try:
+        await status_msg.edit_text("🤔 Хм, интересненько...")
+        await asyncio.sleep(0.8)
+        
+        await status_msg.edit_text("💭 Думаю-думаю...")
+        
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
 
@@ -754,7 +770,10 @@ async def handle_photo(message: Message, state: FSMContext):
 
         result = await analyze_food_photo(photo_bytes, user_language, user_id)
         
+        await status_msg.edit_text("✨ Готово! Вот что думаю:")
+        await asyncio.sleep(0.5)
         await status_msg.delete()
+        
         await message.answer(result)
 
     except Exception as e:
@@ -936,7 +955,8 @@ async def menu_weigh_in(message: Message, state: FSMContext):
     await message.answer(
         "⚖️ Взвешивание\n\n"
         "Напиши свой текущий вес в килограммах.\n"
-        "Например: 101"
+        "Например: 101\n\n"
+        "Я запомню и покажу твой прогресс! 📊"
     )
     await state.set_state(WeightTracking.waiting_weight)
 
@@ -1015,22 +1035,27 @@ async def process_weight_input(message: Message, state: FSMContext):
         # Вычисляем разницу
         diff = old_weight - new_weight
         
-        # Красивое сообщение
+        # Красивое сообщение с эмодзи
         if abs(diff) < 0.1:
             result = (
                 f"⚖️ Вес зафиксирован: {new_weight} кг\n\n"
-                f"Вес стабилен! Так держать! 💪"
+                f"Вес стабилен! 👍\n"
+                f"Держишь планку - молодец! 💪"
             )
         elif diff > 0:
+            # Похудел
+            emoji = "🔥" if diff >= 2 else "✨"
             result = (
                 f"⚖️ Вес зафиксирован: {new_weight} кг\n\n"
                 f"⬇️ -{diff:.1f} кг с прошлого раза!\n"
-                f"Отличная работа! 🔥"
+                f"Отличная работа! {emoji}"
             )
         else:
+            # Поправился
             result = (
                 f"⚖️ Вес зафиксирован: {new_weight} кг\n\n"
-                f"⬆️ +{abs(diff):.1f} кг с прошлого раза"
+                f"⬆️ +{abs(diff):.1f} кг с прошлого раза\n"
+                f"Ничего, главное - не останавливаться! 💪"
             )
         
         # Добавляем прогресс если есть история
@@ -1039,11 +1064,12 @@ async def process_weight_input(message: Message, state: FSMContext):
             total_diff = first_weight - new_weight
             if abs(total_diff) > 0.1:
                 if total_diff > 0:
-                    result += f"\n\n💪 Всего скинул: {total_diff:.1f} кг!"
+                    emoji = "🔥🔥🔥" if total_diff >= 10 else "🔥🔥" if total_diff >= 5 else "🔥"
+                    result += f"\n\n💪 Всего скинул: {total_diff:.1f} кг! {emoji}"
                 else:
                     result += f"\n\n📈 Всего набрал: {abs(total_diff):.1f} кг"
         
-        result += "\n\nНажми '📊 Мой прогресс' чтобы увидеть динамику!"
+        result += "\n\n📊 Нажми 'Мой прогресс' чтобы увидеть динамику!"
         
         await state.clear()
         await message.answer(result)
