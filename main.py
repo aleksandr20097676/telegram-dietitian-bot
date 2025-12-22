@@ -55,6 +55,9 @@ class Onboarding(StatesGroup):
     waiting_whA = State()
     waiting_activity = State()
 
+class WeightTracking(StatesGroup):
+    waiting_weight = State()
+
 
 # -------------------- helpers --------------------
 def normalize_text(s: str) -> str:
@@ -114,7 +117,8 @@ def create_main_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📸 Фото еды"), KeyboardButton(text="💬 Вопрос")],
             [KeyboardButton(text="📋 План питания"), KeyboardButton(text="💪 Тренировки")],
-            [KeyboardButton(text="📊 Мой прогресс"), KeyboardButton(text="⚙️ Настройки")]
+            [KeyboardButton(text="⚖️ Взвеситься"), KeyboardButton(text="📊 Мой прогресс")],
+            [KeyboardButton(text="⚙️ Настройки")]
         ],
         resize_keyboard=True
     )
@@ -802,22 +806,223 @@ async def menu_workout(message: Message):
 
 @dp.message(F.text.in_(["📊 Мой прогресс"]))
 async def menu_progress(message: Message):
-    """Handle progress button from menu"""
+    """Handle progress button from menu - show weight history"""
     user_id = message.from_user.id
     name = await get_fact(user_id, "name") or "друг"
-    weight = await get_fact(user_id, "weight_kg") or "?"
+    current_weight = await get_fact(user_id, "weight_kg") or "?"
     goal = await get_fact(user_id, "goal") or "?"
     
-    # Простой прогресс (пока без истории весов)
-    progress = (
-        f"📊 Твой прогресс, {name}:\n\n"
-        f"⚖️ Текущий вес: {weight} кг\n"
-        f"🎯 Цель: {goal}\n\n"
-        "💡 Функция отслеживания прогресса в разработке!\n"
-        "Скоро ты сможешь видеть график изменения веса и достижения 🏆"
-    )
+    # Получаем историю взвешиваний
+    import json
+    weight_history_str = await get_fact(user_id, "weight_history")
     
-    await message.answer(progress)
+    if not weight_history_str:
+        # Нет истории - показываем базовую инфу
+        progress = (
+            f"📊 Твой прогресс, {name}:\n\n"
+            f"⚖️ Текущий вес: {current_weight} кг\n"
+            f"🎯 Цель: {goal}\n\n"
+            "💡 Нажми '⚖️ Взвеситься' чтобы начать отслеживать прогресс!"
+        )
+        await message.answer(progress)
+        return
+    
+    try:
+        # Парсим историю
+        history = json.loads(weight_history_str)
+        
+        if not history or len(history) == 0:
+            progress = (
+                f"📊 Твой прогресс, {name}:\n\n"
+                f"⚖️ Текущий вес: {current_weight} кг\n"
+                f"🎯 Цель: {goal}\n\n"
+                "💡 Нажми '⚖️ Взвеситься' чтобы начать отслеживать прогресс!"
+            )
+            await message.answer(progress)
+            return
+        
+        # Сортируем по дате
+        history.sort(key=lambda x: x['date'])
+        
+        # Формируем красивый прогресс
+        first_weight = history[0]['weight']
+        last_weight = history[-1]['weight']
+        total_diff = first_weight - last_weight
+        
+        progress_text = f"📊 Твой прогресс, {name}:\n\n"
+        
+        # Показываем последние 5 взвешиваний
+        recent = history[-5:] if len(history) > 5 else history
+        
+        for i, entry in enumerate(recent):
+            date = entry['date']
+            weight = entry['weight']
+            
+            # Вычисляем разницу с предыдущим
+            if i > 0:
+                prev_weight = recent[i-1]['weight']
+                diff = prev_weight - weight
+                if diff > 0:
+                    diff_str = f"⬇️ -{diff:.1f}кг"
+                elif diff < 0:
+                    diff_str = f"⬆️ +{abs(diff):.1f}кг"
+                else:
+                    diff_str = "="
+            else:
+                diff_str = "старт"
+            
+            progress_text += f"{date}  ●━━  {weight} кг  {diff_str}\n"
+        
+        # Итоговая статистика
+        progress_text += f"\n🎯 Цель: {goal}\n"
+        
+        if total_diff > 0:
+            progress_text += f"💪 Всего скинул: {total_diff:.1f} кг 🔥\n"
+        elif total_diff < 0:
+            progress_text += f"📈 Набрал: {abs(total_diff):.1f} кг\n"
+        else:
+            progress_text += f"⚖️ Вес стабилен\n"
+        
+        # Прогресс-бар (если худеем)
+        if total_diff > 0:
+            days = len(history)
+            progress_text += f"📅 За {days} {'день' if days == 1 else 'дней' if days < 5 else 'дней'}\n"
+        
+        await message.answer(progress_text)
+        
+    except Exception as e:
+        logger.error(f"Error parsing weight history: {e}")
+        progress = (
+            f"📊 Твой прогресс, {name}:\n\n"
+            f"⚖️ Текущий вес: {current_weight} кг\n"
+            f"🎯 Цель: {goal}\n\n"
+            "💡 Нажми '⚖️ Взвеситься' чтобы обновить вес!"
+        )
+        await message.answer(progress)
+
+
+@dp.message(F.text.in_(["⚖️ Взвеситься"]))
+async def menu_weigh_in(message: Message, state: FSMContext):
+    """Handle weigh-in button from menu"""
+    await message.answer(
+        "⚖️ Взвешивание\n\n"
+        "Напиши свой текущий вес в килограммах.\n"
+        "Например: 101"
+    )
+    await state.set_state(WeightTracking.waiting_weight)
+
+
+@dp.message(WeightTracking.waiting_weight, F.text)
+async def process_weight_input(message: Message, state: FSMContext):
+    """Process weight input and save to history"""
+    user_id = message.from_user.id
+    text = normalize_text(message.text)
+    
+    # Парсим вес
+    try:
+        # Извлекаем число из текста
+        nums = re.findall(r'\d+\.?\d*', text)
+        if not nums:
+            await message.answer("Не вижу вес. Напиши число, например: 101")
+            return
+        
+        new_weight = float(nums[0])
+        
+        # Проверка на разумность
+        if new_weight < 30 or new_weight > 350:
+            await message.answer("Кажется, это нереальный вес. Попробуй ещё раз.")
+            return
+        
+        # Получаем старый вес для сравнения
+        old_weight_str = await get_fact(user_id, "weight_kg")
+        old_weight = float(old_weight_str) if old_weight_str else new_weight
+        
+        # Обновляем текущий вес
+        await set_fact(user_id, "weight_kg", str(new_weight))
+        
+        # Добавляем в историю
+        import json
+        from datetime import datetime
+        
+        weight_history_str = await get_fact(user_id, "weight_history")
+        
+        if weight_history_str:
+            try:
+                history = json.loads(weight_history_str)
+            except:
+                history = []
+        else:
+            # Первое взвешивание - добавляем начальный вес если он был
+            history = []
+            if old_weight_str and old_weight != new_weight:
+                # Добавляем старый вес как начальную точку (вчера)
+                from datetime import timedelta
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%d.%m")
+                history.append({
+                    'date': yesterday,
+                    'weight': old_weight
+                })
+        
+        # Добавляем новое взвешивание
+        today = datetime.now().strftime("%d.%m")
+        
+        # Проверяем есть ли уже запись на сегодня
+        today_exists = False
+        for i, entry in enumerate(history):
+            if entry['date'] == today:
+                history[i]['weight'] = new_weight
+                today_exists = True
+                break
+        
+        if not today_exists:
+            history.append({
+                'date': today,
+                'weight': new_weight
+            })
+        
+        # Сохраняем историю
+        await set_fact(user_id, "weight_history", json.dumps(history))
+        
+        # Вычисляем разницу
+        diff = old_weight - new_weight
+        
+        # Красивое сообщение
+        if abs(diff) < 0.1:
+            result = (
+                f"⚖️ Вес зафиксирован: {new_weight} кг\n\n"
+                f"Вес стабилен! Так держать! 💪"
+            )
+        elif diff > 0:
+            result = (
+                f"⚖️ Вес зафиксирован: {new_weight} кг\n\n"
+                f"⬇️ -{diff:.1f} кг с прошлого раза!\n"
+                f"Отличная работа! 🔥"
+            )
+        else:
+            result = (
+                f"⚖️ Вес зафиксирован: {new_weight} кг\n\n"
+                f"⬆️ +{abs(diff):.1f} кг с прошлого раза"
+            )
+        
+        # Добавляем прогресс если есть история
+        if len(history) > 1:
+            first_weight = history[0]['weight']
+            total_diff = first_weight - new_weight
+            if abs(total_diff) > 0.1:
+                if total_diff > 0:
+                    result += f"\n\n💪 Всего скинул: {total_diff:.1f} кг!"
+                else:
+                    result += f"\n\n📈 Всего набрал: {abs(total_diff):.1f} кг"
+        
+        result += "\n\nНажми '📊 Мой прогресс' чтобы увидеть динамику!"
+        
+        await state.clear()
+        await message.answer(result)
+        
+    except Exception as e:
+        logger.error(f"Error processing weight: {e}")
+        await message.answer("Произошла ошибка. Попробуй ещё раз!")
+        await state.clear()
 
 
 @dp.message(F.text.in_(["⚙️ Настройки"]))
@@ -866,17 +1071,18 @@ async def handle_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
     text = normalize_text(message.text)
 
-    # Don't process if in onboarding state
+    # Don't process if in onboarding or weight tracking state
     current_state = await state.get_state()
     if current_state in {
         Onboarding.waiting_name.state,
         Onboarding.waiting_goal.state,
         Onboarding.waiting_whA.state,
         Onboarding.waiting_activity.state,
+        WeightTracking.waiting_weight.state,
     }:
         return
 
-# Check profile complete - if missing, START onboarding immediately!
+    # Check profile complete - if missing, START onboarding immediately!
     missing = await profile_missing(user_id)
     if missing is not None:
         # Start onboarding right away instead of asking to type /start
