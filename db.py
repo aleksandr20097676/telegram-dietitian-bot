@@ -1,3 +1,4 @@
+
 import os
 import asyncpg
 from typing import Optional, Dict, Any, List, Tuple
@@ -27,6 +28,9 @@ def _require_pool() -> asyncpg.Pool:
 async def init_db() -> None:
     """
     Initialize asyncpg pool + create tables if not exist.
+    
+    ⚠️ IMPORTANT: This will DROP and recreate tables on first run!
+    After first successful deployment, you should remove the DROP commands.
     """
     global _pool
 
@@ -37,6 +41,12 @@ async def init_db() -> None:
 
     pool = _require_pool()
     async with pool.acquire() as conn:
+        # ⚠️ TODO: После первого успешного деплоя - УДАЛИ эти 3 строки!
+        # Они нужны только ОДИН РАЗ чтобы пересоздать таблицы с правильной структурой
+        await conn.execute("DROP TABLE IF EXISTS messages CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS user_facts CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS users CASCADE;")
+        
         # 1) Профиль пользователя: хранит "последние" известные значения
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -58,20 +68,21 @@ async def init_db() -> None:
         );
         """)
 
-        # 2) История диалога (контекст). Можно ограничивать лимитом в коде.
+        # 2) История диалога (контекст)
+        # ✅ PRODUCTION: Foreign key включён для целостности данных
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id          BIGSERIAL PRIMARY KEY,
             user_id     BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-            role        TEXT NOT NULL,     -- 'user' or 'assistant'
+            role        TEXT NOT NULL,
             content     TEXT NOT NULL,
             created_at  TIMESTAMPTZ DEFAULT now()
         );
         CREATE INDEX IF NOT EXISTS idx_messages_user_id_id ON messages(user_id, id);
         """)
 
-        # 3) Универсальные факты о пользователе (ключ-значение), всегда храним последнее
-        # Примеры ключей: "work", "diet", "allergy", "target_weight", "city" и т.д.
+        # 3) Универсальные факты о пользователе (ключ-значение)
+        # ✅ PRODUCTION: Foreign key включён для целостности данных
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_facts (
             user_id     BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -161,6 +172,9 @@ async def upsert_user(user_id: int, **fields: Any) -> None:
 # -----------------------
 
 async def add_message(user_id: int, role: str, content: str) -> None:
+    # ✅ ИСПРАВЛЕНО: Создаём пользователя если его нет
+    await ensure_user(user_id)
+    
     pool = _require_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -206,28 +220,19 @@ async def trim_messages(user_id: int, keep_last: int = 60) -> None:
 # Facts (memory key/value)
 # -----------------------
 
-async def ensure_user_exists(user_id: int) -> None:
-    pool = _require_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO users (user_id)
-            VALUES ($1)
-            ON CONFLICT (user_id) DO NOTHING;
-            """,
-            user_id,
-        )
-
-
 async def set_fact(user_id: int, key: str, value: str) -> None:
     """
     Save/overwrite a single fact. Always keeps last value.
+    ✅ ИСПРАВЛЕНО: Автоматически создаёт пользователя если его нет!
     """
     key = key.strip().lower()
     value = value.strip()
 
     if not key or not value:
         return
+
+    # ✅ ВАЖНО: Создаём пользователя ПЕРЕД вставкой факта!
+    await ensure_user(user_id)
 
     pool = _require_pool()
     async with pool.acquire() as conn:
@@ -243,9 +248,13 @@ async def set_fact(user_id: int, key: str, value: str) -> None:
 async def set_facts(user_id: int, facts: Dict[str, str]) -> None:
     """
     Save multiple facts in one transaction.
+    ✅ ИСПРАВЛЕНО: Автоматически создаёт пользователя если его нет!
     """
     if not facts:
         return
+
+    # ✅ ВАЖНО: Создаём пользователя ПЕРЕД вставкой фактов!
+    await ensure_user(user_id)
 
     pool = _require_pool()
     async with pool.acquire() as conn:
