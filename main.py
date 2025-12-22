@@ -876,10 +876,25 @@ async def handle_text(message: Message, state: FSMContext):
     }:
         return
 
-    # Check profile complete
+# Check profile complete - if missing, START onboarding immediately!
     missing = await profile_missing(user_id)
     if missing is not None:
-        await message.answer("Сначала давай познакомимся! 🙂 Напиши /start")
+        # Start onboarding right away instead of asking to type /start
+        greeting = (
+            "👋 Привет! Я твой AI-диетолог.\n\n"
+            "🎯 Что я умею:\n"
+            "• Анализировать фото еды и считать калории 📸\n"
+            "• Составлять персональные планы питания 📋\n"
+            "• Подбирать программы тренировок 💪\n"
+            "• Создавать режим дня под твои цели ⏰\n"
+            "• Помогать достичь желаемого веса 🎯\n\n"
+            "Давай познакомимся и составим твой идеальный план! 😊"
+        )
+        
+        await message.answer(greeting, reply_markup=ReplyKeyboardRemove())
+        await asyncio.sleep(1)
+        await message.answer("Как тебя зовут? Напиши, пожалуйста, только имя.")
+        await state.set_state(Onboarding.waiting_name)
         return
 
     # Quick greetings
