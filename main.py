@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Telegram Dietitian Bot - Photo Food Analysis + Onboarding (saved to DB)
-
-ИСПРАВЛЕНО:
-- Убран raise StopIteration который крашил бота!
-- Правильная логика обработки reset команды
-- System prompt для фото анализа - мягкий и эффективный
-- Парсинг активности и работы исправлен
+Telegram Dietitian Bot - УЛУЧШЕННАЯ ВЕРСИЯ
+✅ Красивые inline кнопки
+✅ Главное меню внизу экрана
+✅ Карточки с результатами
+✅ Приветствие и представление
 """
 
 import asyncio
@@ -21,18 +19,14 @@ from openai import AsyncOpenAI
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
-
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# Your project modules
 from config import TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL
 from database import FOOD_DATABASE
 from languages import detect_language, get_text
-
-# db.py functions
 from db import init_db, ensure_user_exists, set_fact, set_facts, get_fact
 
 
@@ -58,8 +52,8 @@ dp = Dispatcher(storage=MemoryStorage())
 class Onboarding(StatesGroup):
     waiting_name = State()
     waiting_goal = State()
-    waiting_whA = State()       # weight,height,age
-    waiting_activity = State()  # activity + job
+    waiting_whA = State()
+    waiting_activity = State()
 
 
 # -------------------- helpers --------------------
@@ -68,14 +62,7 @@ def normalize_text(s: str) -> str:
 
 
 def parse_weight_height_age(text: str) -> Optional[Tuple[int, int, int]]:
-    """
-    Accepts:
-      "114, 182, 49"
-      "114 182 49"
-      "114/182/49"
-      "вес 114 рост 182 возраст 49"
-    Returns (weight, height, age) if valid.
-    """
+    """Parse weight, height, age from text"""
     t = normalize_text(text)
     nums = re.findall(r"\d{1,3}", t)
     if len(nums) < 3:
@@ -85,7 +72,6 @@ def parse_weight_height_age(text: str) -> Optional[Tuple[int, int, int]]:
     h = int(nums[1])
     a = int(nums[2])
 
-    # sanity checks
     if not (30 <= w <= 350):
         return None
     if not (120 <= h <= 230):
@@ -103,9 +89,7 @@ def is_reset_command(text: str) -> bool:
 
 
 async def profile_missing(user_id: int) -> Optional[str]:
-    """
-    Returns a prompt string for what is missing OR None if profile is complete.
-    """
+    """Returns prompt for missing data or None if complete"""
     name = await get_fact(user_id, "name")
     goal = await get_fact(user_id, "goal")
     weight = await get_fact(user_id, "weight_kg")
@@ -114,29 +98,55 @@ async def profile_missing(user_id: int) -> Optional[str]:
     activity = await get_fact(user_id, "activity")
 
     if not name:
-        return "Как тебя зовут? Напиши, пожалуйста, только имя."
+        return "name"
     if not goal:
-        return "Какая цель? (похудеть / поддерживать / набрать мышечную массу)"
+        return "goal"
     if not (weight and height and age):
-        return "Напиши одним сообщением: вес, рост, возраст. Например: 114, 182, 49"
+        return "wha"
     if not activity:
-        return "Какая у тебя активность? (низкая / средняя / высокая) и чем занимаешься (работа)?"
+        return "activity"
     return None
 
 
+def create_main_menu() -> ReplyKeyboardMarkup:
+    """Создаёт главное меню внизу экрана"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📸 Фото еды"), KeyboardButton(text="💬 Вопрос")],
+            [KeyboardButton(text="📋 План питания"), KeyboardButton(text="💪 Тренировки")],
+            [KeyboardButton(text="📊 Мой прогресс"), KeyboardButton(text="⚙️ Настройки")]
+        ],
+        resize_keyboard=True
+    )
+
+
+def format_food_card(food_name: str, calories: int, protein: float, fat: float, carbs: float, weight: int = 100) -> str:
+    """Форматирует красивую карточку с результатами анализа"""
+    card = (
+        "╔═══════════════════════════╗\n"
+        "║   📊 АНАЛИЗ БЛЮДА        ║\n"
+        "╠═══════════════════════════╣\n"
+        f"║ 🍽 {food_name}\n"
+        f"║ ⚖️ Порция: ~{weight}г\n"
+        "║                           ║\n"
+        f"║ 🔥 Калории: {calories} ккал\n"
+        f"║ 🥩 Белки: {protein}г\n"
+        f"║ 🧈 Жиры: {fat}г\n"
+        f"║ 🍞 Углеводы: {carbs}г\n"
+        "╚═══════════════════════════╝"
+    )
+    return card
+
+
 async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
-    """
-    Vision analysis for food photo.
-    ВАЖНО: GPT_MODEL должен поддерживать vision (например gpt-4o).
-    """
+    """Vision analysis for food photo with beautiful card"""
     try:
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
-        # Small DB description for reference
         db_description = "Примеры из базы продуктов:\n"
         count = 0
         for food_name, food_data in FOOD_DATABASE.items():
-            if count >= 15:  # Limit examples
+            if count >= 15:
                 break
             db_description += (
                 f"- {food_name}: {food_data['calories']} ккал/{food_data['portion']}, "
@@ -144,23 +154,29 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
             )
             count += 1
 
-        # ✅ ПРАВИЛЬНЫЙ system prompt - позитивный и конкретный
         system_prompt = (
-            "Ты опытный диетолог-нутрициолог. Твоя задача - помочь пользователю понять "
-            "питательную ценность еды на фотографии.\n\n"
-            "ВАЖНО: Анализируй только еду и напитки. Игнорируй фон, посуду, людей.\n\n"
-            "Если на фото НЕТ еды или напитков - вежливо попроси описать блюдо словами."
+            "Ты опытный диетолог-нутрициолог. Анализируй еду на фото.\n\n"
+            "ФОРМАТ ОТВЕТА:\n"
+            "1. Название блюда (одно слово или фраза)\n"
+            "2. Вес порции в граммах\n"
+            "3. Калории (только число)\n"
+            "4. Белки в граммах (только число)\n"
+            "5. Жиры в граммах (только число)\n"
+            "6. Углеводы в граммах (только число)\n"
+            "7. Краткий комментарий (1-2 предложения)\n\n"
+            "Если на фото нет еды - сразу скажи что это не еда."
         )
 
         user_prompt = (
             f"{db_description}\n\n"
-            "📸 Проанализируй еду на фотографии:\n"
-            "1. Определи ЧТО за блюдо/продукты\n"
-            "2. Оцени примерный вес каждого компонента (граммы)\n"
-            "3. Рассчитай калории и БЖУ (белки/жиры/углеводы)\n\n"
-            "Если не уверен в каком-то компоненте - предложи 2-3 варианта и задай "
-            "ОДИН уточняющий вопрос.\n\n"
-            "Формат ответа: краткий, дружелюбный, по делу."
+            "Проанализируй фото и ответь СТРОГО в формате:\n"
+            "БЛЮДО: название\n"
+            "ВЕС: число\n"
+            "КАЛОРИИ: число\n"
+            "БЕЛКИ: число\n"
+            "ЖИРЫ: число\n"
+            "УГЛЕВОДЫ: число\n"
+            "КОММЕНТАРИЙ: текст"
         )
 
         resp = await openai_client.chat.completions.create(
@@ -183,10 +199,55 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
         )
 
         result = (resp.choices[0].message.content or "").strip()
+        
         if not result:
             return "Не смог проанализировать фото. Попробуй другое фото или опиши блюдо словами."
 
-        return result
+        # Парсим ответ и создаём красивую карточку
+        lines = result.split('\n')
+        food_name = "Блюдо"
+        weight = 100
+        calories = 0
+        protein = 0.0
+        fat = 0.0
+        carbs = 0.0
+        comment = ""
+        
+        for line in lines:
+            line_lower = line.lower()
+            if 'блюдо:' in line_lower or 'dish:' in line_lower:
+                food_name = line.split(':', 1)[1].strip()
+            elif 'вес:' in line_lower or 'weight:' in line_lower:
+                nums = re.findall(r'\d+', line)
+                if nums:
+                    weight = int(nums[0])
+            elif 'калор' in line_lower or 'calor' in line_lower:
+                nums = re.findall(r'\d+', line)
+                if nums:
+                    calories = int(nums[0])
+            elif 'белк' in line_lower or 'protein' in line_lower:
+                nums = re.findall(r'\d+\.?\d*', line)
+                if nums:
+                    protein = float(nums[0])
+            elif 'жир' in line_lower or 'fat' in line_lower:
+                nums = re.findall(r'\d+\.?\d*', line)
+                if nums:
+                    fat = float(nums[0])
+            elif 'углевод' in line_lower or 'carb' in line_lower:
+                nums = re.findall(r'\d+\.?\d*', line)
+                if nums:
+                    carbs = float(nums[0])
+            elif 'комментарий:' in line_lower or 'comment:' in line_lower:
+                comment = line.split(':', 1)[1].strip()
+        
+        # Создаём красивую карточку
+        card = format_food_card(food_name, calories, protein, fat, carbs, weight)
+        
+        # Добавляем комментарий если есть
+        if comment:
+            card += f"\n\n💡 {comment}"
+        
+        return card
 
     except Exception as e:
         logger.error(f"Error analyzing photo: {e}", exc_info=True)
@@ -197,9 +258,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_language: str) -> str:
 
 
 async def chat_reply(user_text: str, user_language: str, user_id: int) -> str:
-    """
-    Normal chat reply with user profile context.
-    """
+    """Normal chat reply with user profile context"""
     try:
         name = await get_fact(user_id, "name") or ""
         goal = await get_fact(user_id, "goal") or ""
@@ -210,41 +269,21 @@ async def chat_reply(user_text: str, user_language: str, user_id: int) -> str:
         job = await get_fact(user_id, "job") or ""
 
         profile = (
-            f"Профиль пользователя: имя={name}, цель={goal}, "
-            f"вес={weight}кг, рост={height}см, возраст={age} лет, "
+            f"Профиль: имя={name}, цель={goal}, "
+            f"вес={weight}кг, рост={height}см, возраст={age}, "
             f"активность={activity}, работа={job}."
         )
 
         system_ru = (
-            "Ты дружелюбный и опытный AI-диетолог.\n\n"
-            "Стиль общения:\n"
-            "- Короткие ответы (2-4 предложения)\n"
-            "- Один уточняющий вопрос максимум\n"
-            "- Используй смайлы умеренно 🙂\n"
-            "- НЕ переспрашивай данные из профиля\n\n"
-            "Когда уместно - предлагай прислать фото еды для точного подсчёта калорий.\n\n"
+            "Ты дружелюбный AI-диетолог.\n"
+            "Стиль: короткие ответы (2-4 предложения), один вопрос максимум.\n"
             f"{profile}"
         )
-
-        system_cs = (
-            "Jsi přátelský a zkušený AI-dietolog.\n"
-            "Odpovídej stručně (2-4 věty). Neptej se znovu na data z profilu.\n"
-            f"{profile}"
-        )
-
-        system_en = (
-            "You are a friendly and experienced AI dietitian.\n"
-            "Keep answers concise (2-4 sentences). Don't ask again for profile data.\n"
-            f"{profile}"
-        )
-
-        system_map = {"ru": system_ru, "cs": system_cs, "en": system_en}
-        system_prompt = system_map.get(user_language, system_ru)
 
         resp = await openai_client.chat.completions.create(
             model=GPT_MODEL,
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_ru},
                 {"role": "user", "content": user_text},
             ],
             max_tokens=500,
@@ -260,40 +299,41 @@ async def chat_reply(user_text: str, user_language: str, user_id: int) -> str:
 # -------------------- /start command --------------------
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
-    """Handle /start command - begin or resume onboarding"""
+    """✅ Улучшенное приветствие с главным меню"""
     user_id = message.from_user.id
     await state.clear()
 
-    # Check if profile is complete
+    user_language = detect_language(message.from_user.language_code)
     missing = await profile_missing(user_id)
     
     if missing is None:
-        # Profile complete - welcome back
+        # Профиль заполнен - показываем главное меню
         name = await get_fact(user_id, "name") or "друг"
+        menu = create_main_menu()
+        
         await message.answer(
-            f"Привет, {name}! 😊 Я твой AI-диетолог.\n"
-            f"Как дела? Я твой AI-диетолог. Хочешь похудеть, набрать форму "
-            f"или просто разобраться с питанием?"
+            f"С возвращением, {name}! 😊\n"
+            f"Я готов помочь тебе с питанием. Чем займёмся сегодня?",
+            reply_markup=menu
         )
         return
 
-    # Profile incomplete - start onboarding
-    await message.answer(
-        "Привет! 😊 Как дела? Я твой AI-диетолог. "
-        "Хочешь похудеть, набрать форму или просто разобраться с питанием?"
+    # Профиль не заполнен - ПРИВЕТСТВИЕ без кнопок
+    greeting = (
+        "👋 Привет! Я твой AI-диетолог.\n\n"
+        "🎯 Что я умею:\n"
+        "• Анализировать фото еды и считать калории 📸\n"
+        "• Составлять персональные планы питания 📋\n"
+        "• Подбирать программы тренировок 💪\n"
+        "• Создавать режим дня под твои цели ⏰\n"
+        "• Помогать достичь желаемого веса 🎯\n\n"
+        "Давай познакомимся и составим твой идеальный план! 😊"
     )
     
-    await message.answer(missing)
-
-    # Set correct state based on what's missing
-    if "как тебя зовут" in missing.lower():
-        await state.set_state(Onboarding.waiting_name)
-    elif "какая цель" in missing.lower():
-        await state.set_state(Onboarding.waiting_goal)
-    elif "вес, рост, возраст" in missing.lower():
-        await state.set_state(Onboarding.waiting_whA)
-    else:
-        await state.set_state(Onboarding.waiting_activity)
+    await message.answer(greeting, reply_markup=ReplyKeyboardRemove())
+    await asyncio.sleep(1.5)
+    await message.answer("Как тебя зовут? Напиши, пожалуйста, только имя.")
+    await state.set_state(Onboarding.waiting_name)
 
 
 @dp.message(Command("help"))
@@ -302,11 +342,12 @@ async def cmd_help(message: Message):
     await message.answer(
         "📋 Команды:\n"
         "/start — начать или продолжить\n"
-        "reset — сбросить анкету и пройти заново\n\n"
+        "reset — сбросить анкету\n\n"
         "💬 Можно:\n"
-        "- Задавать вопросы про питание (текстом или 🎤 голосом)\n"
-        "- Присылать фото еды для анализа\n"
-        "- Просить план питания или тренировок"
+        "• Задавать вопросы про питание\n"
+        "• Присылать фото еды для анализа 📸\n"
+        "• Присылать голосовые сообщения 🎤\n"
+        "• Просить план питания или тренировок"
     )
 
 
@@ -314,24 +355,15 @@ async def cmd_help(message: Message):
 @dp.message(Onboarding.waiting_name, F.text)
 async def onboarding_name(message: Message, state: FSMContext):
     """Collect user name"""
-    # Check for reset command
     if is_reset_command(message.text):
         user_id = message.from_user.id
         await ensure_user_exists(user_id)
         await set_facts(user_id, {
-            "name": "",
-            "goal": "",
-            "weight_kg": "",
-            "height_cm": "",
-            "age": "",
-            "activity": "",
-            "job": "",
+            "name": "", "goal": "", "weight_kg": "",
+            "height_cm": "", "age": "", "activity": "", "job": "",
         })
         await state.clear()
-        await message.answer(
-            "✅ Анкету сбросил!\n"
-            "Напиши /start чтобы пройти заново."
-        )
+        await message.answer("✅ Анкету сбросил! Напиши /start чтобы пройти заново.")
         return
     
     user_id = message.from_user.id
@@ -344,65 +376,86 @@ async def onboarding_name(message: Message, state: FSMContext):
 
     await set_fact(user_id, "name", name)
     
+    # ✅ INLINE КНОПКИ для выбора цели
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🏃 Похудеть", callback_data="goal_lose"),
+            InlineKeyboardButton(text="💪 Набрать", callback_data="goal_gain"),
+        ],
+        [
+            InlineKeyboardButton(text="⚖️ Поддерживать", callback_data="goal_maintain")
+        ]
+    ])
+    
     await message.answer(
-        f"Отлично, {name}! Какая цель?\n"
-        "1) Похудеть\n"
-        "2) Набрать\n"
-        "3) Удержание\n\n"
-        "Можно просто написать: похудеть / набрать / удержание"
+        f"Отлично, {name}! Какая у тебя цель?",
+        reply_markup=keyboard
     )
     await state.set_state(Onboarding.waiting_goal)
 
 
-# -------------------- onboarding: goal --------------------
+# -------------------- onboarding: goal (callback) --------------------
+@dp.callback_query(Onboarding.waiting_goal)
+async def onboarding_goal_callback(callback: Message, state: FSMContext):
+    """Handle goal selection from inline buttons"""
+    user_id = callback.from_user.id
+    
+    goal_map = {
+        "goal_lose": "похудеть",
+        "goal_gain": "набрать массу",
+        "goal_maintain": "поддерживать"
+    }
+    
+    goal = goal_map.get(callback.data, "поддерживать")
+    await set_fact(user_id, "goal", goal)
+    
+    # Убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    await callback.answer()
+    await callback.message.answer(
+        "Супер! Отличная цель! 🎯\n\n"
+        "Теперь расскажи мне о себе:\n"
+        "Напиши одним сообщением: вес (кг), рост (см), возраст\n\n"
+        "Например: 114, 182, 49"
+    )
+    await state.set_state(Onboarding.waiting_whA)
+
+
+# -------------------- onboarding: goal (text fallback) --------------------
 @dp.message(Onboarding.waiting_goal, F.text)
-async def onboarding_goal(message: Message, state: FSMContext):
-    """Collect user goal"""
-    # Check for reset
+async def onboarding_goal_text(message: Message, state: FSMContext):
+    """Handle goal if user writes text instead of clicking button"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
         await set_facts(user_id, {
-            "name": "",
-            "goal": "",
-            "weight_kg": "",
-            "height_cm": "",
-            "age": "",
-            "activity": "",
-            "job": "",
+            "name": "", "goal": "", "weight_kg": "",
+            "height_cm": "", "age": "", "activity": "", "job": "",
         })
         await state.clear()
-        await message.answer(
-            "✅ Анкету сбросил!\n"
-            "Напиши /start чтобы пройти заново."
-        )
+        await message.answer("✅ Анкету сбросил! Напиши /start чтобы пройти заново.")
         return
     
     user_id = message.from_user.id
     goal = normalize_text(message.text).lower()
 
-    # Normalize goal
-    if "пох" in goal or goal == "1":
+    if "пох" in goal or "lose" in goal or goal == "1":
         goal_norm = "похудеть"
-    elif "удерж" in goal or "поддерж" in goal or goal == "3":
+    elif "удерж" in goal or "maintain" in goal or goal == "3":
         goal_norm = "поддерживать"
-    elif "наб" in goal or "мыш" in goal or goal == "2":
-        goal_norm = "набрать мышечную массу"
+    elif "наб" in goal or "gain" in goal or "мыш" in goal or goal == "2":
+        goal_norm = "набрать массу"
     else:
         goal_norm = normalize_text(message.text)
 
     await set_fact(user_id, "goal", goal_norm)
 
     await message.answer(
-        "Отлично, что вы решили заняться собой! "
-        "Можете рассказать мне немного о своём росте, весе, уровне физической активности "
-        "и какой результат хотите достичь? Это поможет составить более точный план."
+        "Супер! Отличная цель! 🎯\n\n"
+        "Теперь расскажи мне о себе:\n"
+        "Напиши одним сообщением: вес (кг), рост (см), возраст\n\n"
+        "Например: 114, 182, 49"
     )
-    
-    await message.answer(
-        "Напишите одним сообщением: вес (кг), рост (см), возраст. "
-        "Например: вес 114 рост 182 возраст 49"
-    )
-    
     await state.set_state(Onboarding.waiting_whA)
 
 
@@ -410,32 +463,21 @@ async def onboarding_goal(message: Message, state: FSMContext):
 @dp.message(Onboarding.waiting_whA, F.text)
 async def onboarding_wha(message: Message, state: FSMContext):
     """Collect weight, height, age"""
-    # Check for reset
     if is_reset_command(message.text):
         user_id = message.from_user.id
         await set_facts(user_id, {
-            "name": "",
-            "goal": "",
-            "weight_kg": "",
-            "height_cm": "",
-            "age": "",
-            "activity": "",
-            "job": "",
+            "name": "", "goal": "", "weight_kg": "",
+            "height_cm": "", "age": "", "activity": "", "job": "",
         })
         await state.clear()
-        await message.answer(
-            "✅ Анкету сбросил!\n"
-            "Напиши /start чтобы пройти заново."
-        )
+        await message.answer("✅ Анкету сбросил! Напиши /start чтобы пройти заново.")
         return
     
     user_id = message.from_user.id
     parsed = parse_weight_height_age(message.text)
     
     if parsed is None:
-        await message.answer(
-            "Не вижу: возраст. Напишите ещё раз одним сообщением."
-        )
+        await message.answer("Не вижу все данные. Напиши ещё раз одним сообщением: вес, рост, возраст.")
         return
 
     w, h, a = parsed
@@ -445,71 +487,98 @@ async def onboarding_wha(message: Message, state: FSMContext):
         "age": str(a),
     })
 
-    await message.answer(
-        "Какую цель вы хотите достичь: снизить вес, поддерживать текущий "
-        "или набрать? Также расскажите немного о вашей физической активности."
-    )
+    # ✅ INLINE КНОПКИ для выбора активности
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🛋 Низкая", callback_data="activity_low"),
+            InlineKeyboardButton(text="🚶 Средняя", callback_data="activity_medium"),
+        ],
+        [
+            InlineKeyboardButton(text="🏃 Высокая", callback_data="activity_high")
+        ]
+    ])
     
     await message.answer(
-        "Какая у тебя активность? (низкая / средняя / высокая) "
-        "и чем занимаешься (работа)?"
+        "Отлично! Последний вопрос:\n\n"
+        "Какая у тебя физическая активность?",
+        reply_markup=keyboard
     )
-    
     await state.set_state(Onboarding.waiting_activity)
 
 
-# -------------------- onboarding: activity --------------------
+# -------------------- onboarding: activity (callback) --------------------
+@dp.callback_query(Onboarding.waiting_activity)
+async def onboarding_activity_callback(callback: Message, state: FSMContext):
+    """Handle activity selection from inline buttons"""
+    user_id = callback.from_user.id
+    
+    activity_map = {
+        "activity_low": "низкая",
+        "activity_medium": "средняя",
+        "activity_high": "высокая"
+    }
+    
+    activity = activity_map.get(callback.data, "средняя")
+    await set_facts(user_id, {"activity": activity, "job": ""})
+    
+    # Убираем кнопки
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    await state.clear()
+    
+    # Показываем главное меню
+    menu = create_main_menu()
+    
+    await callback.answer()
+    await callback.message.answer(
+        "Отлично! Теперь я знаю о тебе всё необходимое! 🎉\n\n"
+        "Что могу для тебя сделать:\n"
+        "📸 Пришли фото еды - я посчитаю калории\n"
+        "💬 Задай вопрос о питании\n"
+        "📋 Попроси составить план питания\n"
+        "💪 Подберу программу тренировок\n\n"
+        "С чего начнём?",
+        reply_markup=menu
+    )
+
+
+# -------------------- onboarding: activity (text fallback) --------------------
 @dp.message(Onboarding.waiting_activity, F.text)
-async def onboarding_activity(message: Message, state: FSMContext):
-    """Collect activity level and job"""
-    # Check for reset
+async def onboarding_activity_text(message: Message, state: FSMContext):
+    """Handle activity if user writes text instead of clicking button"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
         await set_facts(user_id, {
-            "name": "",
-            "goal": "",
-            "weight_kg": "",
-            "height_cm": "",
-            "age": "",
-            "activity": "",
-            "job": "",
+            "name": "", "goal": "", "weight_kg": "",
+            "height_cm": "", "age": "", "activity": "", "job": "",
         })
         await state.clear()
-        await message.answer(
-            "✅ Анкету сбросил!\n"
-            "Напиши /start чтобы пройти заново."
-        )
+        await message.answer("✅ Анкету сбросил! Напиши /start чтобы пройти заново.")
         return
     
     user_id = message.from_user.id
     text = normalize_text(message.text)
-
-    # ✅ ИСПРАВЛЕН парсинг активности и работы
     t = text.lower()
+    
     activity = ""
     job = ""
     
-    # Detect activity level
-    if "низ" in t:
+    if "низ" in t or "low" in t:
         activity = "низкая"
-    elif "сред" in t:
+    elif "сред" in t or "moderate" in t:
         activity = "средняя"
-    elif "выс" in t:
+    elif "выс" in t or "high" in t:
         activity = "высокая"
     
-    # Extract job - everything after comma or after activity word
     if "," in text:
         parts = text.split(",", 1)
         if not activity:
             activity = parts[0].strip()
         job = parts[1].strip()
     else:
-        # Try to find job after activity keywords
-        job_match = re.sub(r'(низкая|средняя|высокая)', '', t, flags=re.IGNORECASE).strip()
+        job_match = re.sub(r'(низкая|средняя|высокая|low|moderate|high)', '', t, flags=re.IGNORECASE).strip()
         job = job_match if job_match else ""
-        
         if not activity:
-            # If no activity detected, use first word as activity
             activity = text.split()[0] if text.split() else "средняя"
 
     await set_facts(user_id, {
@@ -517,43 +586,46 @@ async def onboarding_activity(message: Message, state: FSMContext):
         "job": job,
     })
 
-    name = await get_fact(user_id, "name") or ""
-    
     await state.clear()
     
+    # Показываем главное меню
+    menu = create_main_menu()
+    
     await message.answer(
-        f"Отлично. Теперь напиши, что именно нужно (план питания/калории/рацион), "
-        f"или пришли фото еды для анализа. Удачи!"
+        "Отлично! Теперь я знаю о тебе всё необходимое! 🎉\n\n"
+        "Что могу для тебя сделать:\n"
+        "📸 Пришли фото еды - я посчитаю калории\n"
+        "💬 Задай вопрос о питании\n"
+        "📋 Попроси составить план питания\n"
+        "💪 Подберу программу тренировок\n\n"
+        "С чего начнём?",
+        reply_markup=menu
     )
 
 
 # -------------------- voice handler --------------------
 @dp.message(F.voice)
 async def handle_voice(message: Message, state: FSMContext):
-    """Handle voice messages - convert to text with Whisper API"""
+    """Handle voice messages with Whisper API"""
     user_language = detect_language(message.from_user.language_code)
     user_id = message.from_user.id
     
-    status_msg = await message.answer("🎤 Слушаю голосовое сообщение...")
+    status_msg = await message.answer("🎤 Слушаю...")
 
     try:
-        # Download voice message
         voice = message.voice
         file = await bot.get_file(voice.file_id)
         
         buf = BytesIO()
         await bot.download_file(file.file_path, destination=buf)
-        audio_bytes = buf.getvalue()
         
-        # Save to temporary file (Whisper API needs file object)
         buf.seek(0)
-        buf.name = "voice.ogg"  # Whisper accepts .ogg format
+        buf.name = "voice.ogg"
         
-        # Transcribe with Whisper
         transcription = await openai_client.audio.transcriptions.create(
             model="whisper-1",
             file=buf,
-            language="ru"  # Can be auto-detected or set based on user_language
+            language="ru"
         )
         
         recognized_text = transcription.text.strip()
@@ -564,133 +636,54 @@ async def handle_voice(message: Message, state: FSMContext):
             await message.answer("Не удалось распознать речь. Попробуй ещё раз 🙂")
             return
         
-        # Show what was recognized
         await message.answer(f"📝 Распознал: \"{recognized_text}\"")
         
-        # ✅ ИСПРАВЛЕНО: Обрабатываем распознанный текст напрямую
-        # Check for reset command
+        # Process as text - check for reset
         if is_reset_command(recognized_text):
             await set_facts(user_id, {
-                "name": "",
-                "goal": "",
-                "weight_kg": "",
-                "height_cm": "",
-                "age": "",
-                "activity": "",
-                "job": "",
+                "name": "", "goal": "", "weight_kg": "",
+                "height_cm": "", "age": "", "activity": "", "job": "",
             })
             await state.clear()
-            await message.answer(
-                "✅ Анкету сбросил!\n"
-                "Напиши /start чтобы пройти заново."
-            )
+            await message.answer("✅ Анкету сбросил! Напиши /start чтобы пройти заново.")
             return
         
-        # Get current state
+        # Check if in onboarding
         current_state = await state.get_state()
-        
-        # If in onboarding state, handle accordingly
         if current_state == Onboarding.waiting_name.state:
             name = normalize_text(recognized_text)
             if len(name) < 2 or len(name) > 30:
                 await message.answer("Напиши, пожалуйста, только имя (2–30 символов).")
                 return
             await set_fact(user_id, "name", name)
-            await message.answer(
-                f"Отлично, {name}! Какая цель?\n"
-                "1) Похудеть\n"
-                "2) Набрать\n"
-                "3) Удержание"
-            )
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🏃 Похудеть", callback_data="goal_lose"),
+                    InlineKeyboardButton(text="💪 Набрать", callback_data="goal_gain"),
+                ],
+                [
+                    InlineKeyboardButton(text="⚖️ Поддерживать", callback_data="goal_maintain")
+                ]
+            ])
+            await message.answer(f"Отлично, {name}! Какая у тебя цель?", reply_markup=keyboard)
             await state.set_state(Onboarding.waiting_goal)
             return
-            
-        elif current_state == Onboarding.waiting_goal.state:
-            goal = normalize_text(recognized_text).lower()
-            if "пох" in goal or goal == "1":
-                goal_norm = "похудеть"
-            elif "удерж" in goal or "поддерж" in goal or goal == "3":
-                goal_norm = "поддерживать"
-            elif "наб" in goal or "мыш" in goal or goal == "2":
-                goal_norm = "набрать мышечную массу"
-            else:
-                goal_norm = normalize_text(recognized_text)
-            await set_fact(user_id, "goal", goal_norm)
-            await message.answer("Напишите одним сообщением: вес (кг), рост (см), возраст.")
-            await state.set_state(Onboarding.waiting_whA)
-            return
-            
-        elif current_state == Onboarding.waiting_whA.state:
-            parsed = parse_weight_height_age(recognized_text)
-            if parsed is None:
-                await message.answer("Не вижу: возраст. Напишите ещё раз.")
-                return
-            w, h, a = parsed
-            await set_facts(user_id, {
-                "weight_kg": str(w),
-                "height_cm": str(h),
-                "age": str(a),
-            })
-            await message.answer("Какая у тебя активность? (низкая / средняя / высокая) и чем занимаешься?")
-            await state.set_state(Onboarding.waiting_activity)
-            return
-            
-        elif current_state == Onboarding.waiting_activity.state:
-            text = normalize_text(recognized_text)
-            t = text.lower()
-            activity = ""
-            job = ""
-            
-            if "низ" in t:
-                activity = "низкая"
-            elif "сред" in t:
-                activity = "средняя"
-            elif "выс" in t:
-                activity = "высокая"
-            
-            if "," in text:
-                parts = text.split(",", 1)
-                if not activity:
-                    activity = parts[0].strip()
-                job = parts[1].strip()
-            else:
-                job_match = re.sub(r'(низкая|средняя|высокая)', '', t, flags=re.IGNORECASE).strip()
-                job = job_match if job_match else ""
-                if not activity:
-                    activity = text.split()[0] if text.split() else "средняя"
-            
-            await set_facts(user_id, {
-                "activity": activity or "средняя",
-                "job": job,
-            })
-            await state.clear()
-            await message.answer("Отлично. Теперь напиши, что нужно, или пришли фото еды!")
-            return
         
-        # Not in onboarding - ensure profile complete
+        # Not in onboarding - check profile
         missing = await profile_missing(user_id)
         if missing is not None:
-            await message.answer(missing)
-            if "как тебя зовут" in missing.lower():
-                await state.set_state(Onboarding.waiting_name)
-            elif "какая цель" in missing.lower():
-                await state.set_state(Onboarding.waiting_goal)
-            elif "вес, рост, возраст" in missing.lower():
-                await state.set_state(Onboarding.waiting_whA)
-            else:
-                await state.set_state(Onboarding.waiting_activity)
+            await message.answer("Сначала давай познакомимся! Напиши /start")
             return
         
         # Quick greetings
         low = recognized_text.lower()
         if any(x in low for x in ["привет", "здрав", "hello", "hi"]):
             name = await get_fact(user_id, "name") or "друг"
-            await message.answer(
-                f"Привет, {name}! 😊 Как дела? Чем помочь?"
-            )
+            await message.answer(f"Привет, {name}! 😊 Чем помочь?")
             return
         
-        # Normal chat with GPT
+        # Normal chat
         reply = await chat_reply(recognized_text, user_language, user_id)
         await message.answer(reply)
         
@@ -700,38 +693,22 @@ async def handle_voice(message: Message, state: FSMContext):
             await status_msg.delete()
         except:
             pass
-        await message.answer(
-            "Не смог обработать голосовое сообщение 😔\n"
-            "Попробуй ещё раз или напиши текстом!"
-        )
+        await message.answer("Не смог обработать голосовое 😔 Попробуй ещё раз!")
 
 
 # -------------------- photo handler --------------------
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
-    """Handle photo messages - analyze food"""
+    """Handle photo messages - analyze food with beautiful card"""
     user_language = detect_language(message.from_user.language_code)
     user_id = message.from_user.id
 
-    # If onboarding not complete -> redirect to onboarding
+    # Check if onboarding complete
     missing = await profile_missing(user_id)
     if missing is not None:
-        await message.answer(
-            "Сначала давай познакомимся! 🙂\n\n" + missing
-        )
-        
-        # Set appropriate state
-        if "как тебя зовут" in missing.lower():
-            await state.set_state(Onboarding.waiting_name)
-        elif "какая цель" in missing.lower():
-            await state.set_state(Onboarding.waiting_goal)
-        elif "вес, рост, возраст" in missing.lower():
-            await state.set_state(Onboarding.waiting_whA)
-        else:
-            await state.set_state(Onboarding.waiting_activity)
+        await message.answer("Сначала давай познакомимся! 🙂 Напиши /start")
         return
 
-    # Profile complete - analyze photo
     status_msg = await message.answer("🔍 Анализирую фото...")
 
     try:
@@ -753,32 +730,135 @@ async def handle_photo(message: Message, state: FSMContext):
             await status_msg.delete()
         except:
             pass
-        await message.answer(
-            "Не смог обработать фото 😔\n"
-            "Попробуй ещё раз или опиши блюдо словами!"
-        )
+        await message.answer("Не смог обработать фото 😔 Попробуй ещё раз!")
+
+
+# -------------------- menu button handlers --------------------
+@dp.message(F.text.in_(["📸 Фото еды"]))
+async def menu_photo(message: Message):
+    """Handle photo button from menu"""
+    await message.answer(
+        "📸 Отлично! Сфотографируй свою еду и пришли мне.\n"
+        "Я проанализирую и посчитаю калории, БЖУ."
+    )
+
+
+@dp.message(F.text.in_(["💬 Вопрос"]))
+async def menu_question(message: Message):
+    """Handle question button from menu"""
+    await message.answer(
+        "💬 Задавай любой вопрос о питании!\n"
+        "Можешь писать текстом или голосовым сообщением 🎤"
+    )
+
+
+@dp.message(F.text.in_(["📋 План питания"]))
+async def menu_meal_plan(message: Message):
+    """Handle meal plan button from menu"""
+    user_id = message.from_user.id
+    name = await get_fact(user_id, "name") or "друг"
+    goal = await get_fact(user_id, "goal") or "поддерживать вес"
+    
+    await message.answer(
+        f"{name}, составляю персональный план питания для твоей цели: {goal}...\n"
+        "Это займёт пару секунд ⏳"
+    )
+    
+    # Генерируем план через GPT
+    reply = await chat_reply(
+        f"Составь мне план питания на день с учётом моей цели: {goal}. "
+        "Распиши завтрак, обед, ужин и перекусы.",
+        "ru",
+        user_id
+    )
+    
+    await message.answer(f"📋 Твой план питания:\n\n{reply}")
+
+
+@dp.message(F.text.in_(["💪 Тренировки"]))
+async def menu_workout(message: Message):
+    """Handle workout button from menu"""
+    user_id = message.from_user.id
+    name = await get_fact(user_id, "name") or "друг"
+    goal = await get_fact(user_id, "goal") or "поддерживать форму"
+    activity = await get_fact(user_id, "activity") or "средняя"
+    
+    await message.answer(
+        f"{name}, подбираю программу тренировок для твоей цели: {goal}...\n"
+        "Учитываю твою активность ⏳"
+    )
+    
+    # Генерируем программу через GPT
+    reply = await chat_reply(
+        f"Составь мне программу тренировок на неделю. "
+        f"Моя цель: {goal}. Активность: {activity}. "
+        "Распиши упражнения по дням.",
+        "ru",
+        user_id
+    )
+    
+    await message.answer(f"💪 Твоя программа тренировок:\n\n{reply}")
+
+
+@dp.message(F.text.in_(["📊 Мой прогресс"]))
+async def menu_progress(message: Message):
+    """Handle progress button from menu"""
+    user_id = message.from_user.id
+    name = await get_fact(user_id, "name") or "друг"
+    weight = await get_fact(user_id, "weight_kg") or "?"
+    goal = await get_fact(user_id, "goal") or "?"
+    
+    # Простой прогресс (пока без истории весов)
+    progress = (
+        f"📊 Твой прогресс, {name}:\n\n"
+        f"⚖️ Текущий вес: {weight} кг\n"
+        f"🎯 Цель: {goal}\n\n"
+        "💡 Функция отслеживания прогресса в разработке!\n"
+        "Скоро ты сможешь видеть график изменения веса и достижения 🏆"
+    )
+    
+    await message.answer(progress)
+
+
+@dp.message(F.text.in_(["⚙️ Настройки"]))
+async def menu_settings(message: Message):
+    """Handle settings button from menu"""
+    user_id = message.from_user.id
+    name = await get_fact(user_id, "name") or "?"
+    goal = await get_fact(user_id, "goal") or "?"
+    weight = await get_fact(user_id, "weight_kg") or "?"
+    height = await get_fact(user_id, "height_cm") or "?"
+    age = await get_fact(user_id, "age") or "?"
+    activity = await get_fact(user_id, "activity") or "?"
+    
+    settings = (
+        f"⚙️ Твои настройки:\n\n"
+        f"👤 Имя: {name}\n"
+        f"🎯 Цель: {goal}\n"
+        f"⚖️ Вес: {weight} кг\n"
+        f"📏 Рост: {height} см\n"
+        f"🎂 Возраст: {age} лет\n"
+        f"🏃 Активность: {activity}\n\n"
+        "Чтобы изменить данные, напиши:\nreset"
+    )
+    
+    await message.answer(settings)
 
 
 # -------------------- default text handler --------------------
 @dp.message(F.text)
 async def handle_text(message: Message, state: FSMContext):
     """Handle all other text messages"""
-    # Check for reset command FIRST
     if is_reset_command(message.text):
         user_id = message.from_user.id
         await set_facts(user_id, {
-            "name": "",
-            "goal": "",
-            "weight_kg": "",
-            "height_cm": "",
-            "age": "",
-            "activity": "",
-            "job": "",
+            "name": "", "goal": "", "weight_kg": "",
+            "height_cm": "", "age": "", "activity": "", "job": "",
         })
         await state.clear()
         await message.answer(
-            "✅ Анкету сбросил!\n"
-            "Напиши /start чтобы пройти заново."
+            "✅ Анкету сбросил! Напиши /start чтобы пройти заново.",
+            reply_markup=ReplyKeyboardRemove()
         )
         return
     
@@ -786,7 +866,7 @@ async def handle_text(message: Message, state: FSMContext):
     user_id = message.from_user.id
     text = normalize_text(message.text)
 
-    # If currently in onboarding state, don't process here
+    # Don't process if in onboarding state
     current_state = await state.get_state()
     if current_state in {
         Onboarding.waiting_name.state,
@@ -794,36 +874,23 @@ async def handle_text(message: Message, state: FSMContext):
         Onboarding.waiting_whA.state,
         Onboarding.waiting_activity.state,
     }:
-        # Let the onboarding handlers deal with it
         return
 
-    # Ensure profile is complete
+    # Check profile complete
     missing = await profile_missing(user_id)
     if missing is not None:
-        await message.answer(missing)
-        
-        # Set appropriate state
-        if "как тебя зовут" in missing.lower():
-            await state.set_state(Onboarding.waiting_name)
-        elif "какая цель" in missing.lower():
-            await state.set_state(Onboarding.waiting_goal)
-        elif "вес, рост, возраст" in missing.lower():
-            await state.set_state(Onboarding.waiting_whA)
-        else:
-            await state.set_state(Onboarding.waiting_activity)
+        await message.answer("Сначала давай познакомимся! 🙂 Напиши /start")
         return
 
-    # Quick greetings response
+    # Quick greetings
     low = text.lower()
-    if any(x in low for x in ["привет", "здрав", "hello", "hi", "ahoj", "čau"]):
+    if any(x in low for x in ["привет", "здрав", "hello", "hi", "ahoj"]):
         name = await get_fact(user_id, "name") or "друг"
-        await message.answer(
-            f"Привет, {name}! 😊 Как дела? Я твой AI-диетолог. "
-            f"Хочешь похудеть, набрать форму или просто разобраться с питанием?"
-        )
+        menu = create_main_menu()
+        await message.answer(f"Привет, {name}! 😊 Чем помочь?", reply_markup=menu)
         return
 
-    # Normal chat using GPT
+    # Normal chat
     reply = await chat_reply(text, user_language, user_id)
     await message.answer(reply)
 
@@ -831,7 +898,7 @@ async def handle_text(message: Message, state: FSMContext):
 # -------------------- run --------------------
 async def main():
     logger.info("🚀 Starting Dietitian Bot...")
-    logger.info(f"📊 GPT Model: {GPT_MODEL} (must support vision for photo analysis)")
+    logger.info(f"📊 GPT Model: {GPT_MODEL}")
 
     await init_db()
     logger.info("✅ Database initialized")
