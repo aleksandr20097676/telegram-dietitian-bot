@@ -40,11 +40,7 @@ async def init_db() -> None:
 
     pool = _require_pool()
     async with pool.acquire() as conn:
-        # ⚠️ TODO: После первого успешного деплоя - УДАЛИ эти 3 строки!
-        # Они нужны только ОДИН РАЗ чтобы пересоздать таблицы с правильной структурой
-        await conn.execute("DROP TABLE IF EXISTS messages CASCADE;")
-        await conn.execute("DROP TABLE IF EXISTS user_facts CASCADE;")
-        await conn.execute("DROP TABLE IF EXISTS users CASCADE;")
+       
         
         # 1) Профиль пользователя: хранит "последние" известные значения
         await conn.execute("""
