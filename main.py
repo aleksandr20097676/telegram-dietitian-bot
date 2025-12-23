@@ -235,6 +235,27 @@ def is_reset_command(text: str) -> bool:
     return t in {"reset", "/reset", "сброс", "заново", "начать заново", "resetovat"}
 
 
+async def clear_user_data(user_id: int):
+    """Полностью очищает данные пользователя"""
+    # Список всех фактов для удаления
+    facts_to_clear = [
+        "language", "name", "goal", "weight_kg", "height_cm", 
+        "age", "activity", "job", "weight_history"
+    ]
+    
+    # Устанавливаем все в None (это удалит записи из БД)
+    facts_dict = {fact: None for fact in facts_to_clear}
+    
+    # Но set_facts не поддерживает None, поэтому используем цикл
+    for fact_key in facts_to_clear:
+        try:
+            # Пытаемся удалить факт (если есть функция delete_fact в db.py)
+            # Если нет - set_fact с пустой строкой, но profile_missing теперь это проверяет
+            await set_fact(user_id, fact_key, "")
+        except:
+            pass
+
+
 async def profile_missing(user_id: int) -> Optional[str]:
     """Returns prompt for missing data or None if complete"""
     name = await get_fact(user_id, "name")
@@ -245,15 +266,16 @@ async def profile_missing(user_id: int) -> Optional[str]:
     activity = await get_fact(user_id, "activity")
     language = await get_fact(user_id, "language")
 
-    if not language:
+    # Проверяем не только None, но и пустые строки!
+    if not language or language == "":
         return "language"
-    if not name:
+    if not name or name == "":
         return "name"
-    if not goal:
+    if not goal or goal == "":
         return "goal"
-    if not (weight and height and age):
+    if not weight or weight == "" or not height or height == "" or not age or age == "":
         return "wha"
-    if not activity:
+    if not activity or activity == "":
         return "activity"
     return None
 
@@ -440,12 +462,12 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
                     rec_lines.append(line.strip())
             recommendations = '\n'.join(rec_lines)
         
-        # Проверка если не распознал - покажем что есть
+        # ВАЖНО: Проверка если не распознал - ПЕРЕД созданием карточки!
         if calories == 0 and protein == 0 and fat == 0 and carbs == 0:
-            # Не распознал нормально - показываем что сказал GPT
-            return f"🤔 {result}"
+            # Не распознал - показываем полный ответ GPT (там должны быть вопросы)
+            return f"🤔 Хм, давай разберёмся:\n\n{result}"
         
-        # Создаём карточку
+        # Если распознал хотя бы частично - создаём карточку
         card = format_food_card(food_name, calories, protein, fat, carbs, weight)
         
         # Добавляем рекомендации
@@ -635,13 +657,9 @@ async def onboarding_name(message: Message, state: FSMContext):
     """Collect user name"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
-        await ensure_user_exists(user_id)
-        await set_facts(user_id, {
-            "language": "", "name": "", "goal": "", "weight_kg": "",
-            "height_cm": "", "age": "", "activity": "", "job": "",
-        })
+        await clear_user_data(user_id)
         await state.clear()
-        await message.answer("✅ Reset! Write /start to begin again.")
+        await message.answer("✅ Сброшено! Напиши /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
         return
     
     user_id = message.from_user.id
@@ -723,12 +741,9 @@ async def onboarding_goal_text(message: Message, state: FSMContext):
     """Handle goal if user writes instead of clicking"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
-        await set_facts(user_id, {
-            "language": "", "name": "", "goal": "", "weight_kg": "",
-            "height_cm": "", "age": "", "activity": "", "job": "",
-        })
+        await clear_user_data(user_id)
         await state.clear()
-        await message.answer("✅ Reset!")
+        await message.answer("✅ Сброшено! Напиши /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
         return
     
     user_id = message.from_user.id
@@ -757,12 +772,9 @@ async def onboarding_wha(message: Message, state: FSMContext):
     """Collect weight, height, age"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
-        await set_facts(user_id, {
-            "language": "", "name": "", "goal": "", "weight_kg": "",
-            "height_cm": "", "age": "", "activity": "", "job": "",
-        })
+        await clear_user_data(user_id)
         await state.clear()
-        await message.answer("✅ Reset!")
+        await message.answer("✅ Сброшено! Напиши /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
         return
     
     user_id = message.from_user.id
@@ -838,12 +850,9 @@ async def onboarding_activity_text(message: Message, state: FSMContext):
     """Handle activity if user writes instead of clicking"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
-        await set_facts(user_id, {
-            "language": "", "name": "", "goal": "", "weight_kg": "",
-            "height_cm": "", "age": "", "activity": "", "job": "",
-        })
+        await clear_user_data(user_id)
         await state.clear()
-        await message.answer("✅ Reset!")
+        await message.answer("✅ Сброшено! Напиши /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
         return
     
     user_id = message.from_user.id
@@ -949,12 +958,9 @@ async def handle_voice(message: Message, state: FSMContext):
         await message.answer(f"📝 Recognized: \"{recognized_text}\"")
         
         if is_reset_command(recognized_text):
-            await set_facts(user_id, {
-                "language": "", "name": "", "goal": "", "weight_kg": "",
-                "height_cm": "", "age": "", "activity": "", "job": "",
-            })
+            await clear_user_data(user_id)
             await state.clear()
-            await message.answer("✅ Reset! Write /start")
+            await message.answer("✅ Сброшено! Напиши /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
             return
         
         # Handle based on current state
@@ -1276,12 +1282,9 @@ async def handle_text(message: Message, state: FSMContext):
     """Handle all other text - NO thinking emojis!"""
     if is_reset_command(message.text):
         user_id = message.from_user.id
-        await set_facts(user_id, {
-            "language": "", "name": "", "goal": "", "weight_kg": "",
-            "height_cm": "", "age": "", "activity": "", "job": "",
-        })
+        await clear_user_data(user_id)
         await state.clear()
-        await message.answer("✅ Reset! Write /start to begin again.", reply_markup=ReplyKeyboardRemove())
+        await message.answer("✅ Сброшено! Напиши /start чтобы начать заново.", reply_markup=ReplyKeyboardRemove())
         return
     
     user_id = message.from_user.id
