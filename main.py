@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Telegram Dietitian Bot - УЛУЧШЕННАЯ ВЕРСИЯ
