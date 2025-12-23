@@ -301,3 +301,33 @@ async def get_all_facts(user_id: int) -> Dict[str, str]:
     return {r["key"]: r["value"] for r in rows}
 
 
+async def delete_fact(user_id: int, key: str) -> None:
+    """
+    Delete a single fact from user_facts table.
+    """
+    key = key.strip().lower()
+    if not key:
+        return
+
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM user_facts
+            WHERE user_id=$1 AND key=$2
+        """, user_id, key)
+
+
+async def delete_all_facts(user_id: int) -> None:
+    """
+    Delete ALL facts for a user (for reset).
+    """
+    pool = _require_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM user_facts
+            WHERE user_id=$1
+        """, user_id)
+
+
+
+
