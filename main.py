@@ -30,7 +30,7 @@ from aiogram.fsm.state import State, StatesGroup
 from config import TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL
 from database import FOOD_DATABASE
 from languages import detect_language, get_text
-from db import init_db, ensure_user_exists, set_fact, set_facts, get_fact
+from db import init_db, ensure_user_exists, set_fact, set_facts, get_fact, delete_all_facts
 
 
 # -------------------- logging --------------------
@@ -236,24 +236,23 @@ def is_reset_command(text: str) -> bool:
 
 
 async def clear_user_data(user_id: int):
-    """Полностью очищает данные пользователя"""
-    # Список всех фактов для удаления
-    facts_to_clear = [
-        "language", "name", "goal", "weight_kg", "height_cm", 
-        "age", "activity", "job", "weight_history"
-    ]
-    
-    # Устанавливаем все в None (это удалит записи из БД)
-    facts_dict = {fact: None for fact in facts_to_clear}
-    
-    # Но set_facts не поддерживает None, поэтому используем цикл
-    for fact_key in facts_to_clear:
-        try:
-            # Пытаемся удалить факт (если есть функция delete_fact в db.py)
-            # Если нет - set_fact с пустой строкой, но profile_missing теперь это проверяет
-            await set_fact(user_id, fact_key, "")
-        except:
-            pass
+    """Полностью очищает данные пользователя - УДАЛЯЕТ из БД!"""
+    try:
+        # Удаляем ВСЕ факты из user_facts таблицы
+        await delete_all_facts(user_id)
+    except Exception as e:
+        logger.error(f"Error clearing user data: {e}")
+        # Если функция не найдена (старая версия db.py), пробуем старый способ
+        # НО с пометкой что это не сработает полностью
+        facts_to_clear = [
+            "language", "name", "goal", "weight_kg", "height_cm", 
+            "age", "activity", "job", "weight_history"
+        ]
+        for fact_key in facts_to_clear:
+            try:
+                await set_fact(user_id, fact_key, "")
+            except:
+                pass
 
 
 async def profile_missing(user_id: int) -> Optional[str]:
