@@ -668,42 +668,56 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
             )
             count += 1
 
-        response_lang = get_text_lang(user_lang, "gpt_response_lang")
+        # Язык для ответа
+        lang_instructions = {
+            "ru": "Отвечай ТОЛЬКО на русском языке!",
+            "cs": "Odpovídej POUZE v češtině!",
+            "en": "Respond ONLY in English!"
+        }
+        lang_instruction = lang_instructions.get(user_lang, lang_instructions["ru"])
 
-        system_prompt = (
-            f"Ты дружелюбный AI-диетолог. Отвечай ТОЛЬКО на {response_lang} языке!\n\n"
-            f"ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:\n"
-            f"- Имя: {name}\n"
-            f"- Цель: {goal}\n"
-            f"- Текущий вес: {weight} кг\n"
-            f"- Активность: {activity}\n\n"
-            f"ВАЖНО: Если не уверен что именно на фото:\n"
-            f"- Напиши что видишь частично\n"
-            f"- Перечисли что определил\n"
-            f"- Попроси уточнить остальное\n"
-            f"- НЕ ВЫДАВАЙ нули и пустые данные!\n\n"
-            f"ФОРМАТ ОТВЕТА:\n"
-            f"1. Название блюда (или 'Частично определено')\n"
-            f"2. Вес порции в граммах (или 0 если не определил)\n"
-            f"3. Калории (или 0 если не уверен)\n"
-            f"4. Белки, жиры, углеводы (или 0 если не уверен)\n"
-            f"5. РЕКОМЕНДАЦИИ (ВАЖНО!):\n"
-            f"   80% - Детальные серьёзные советы (5-7 предложений)\n"
-            f"   20% - В КОНЦЕ короткая игривая альтернатива\n\n"
-            f"Если НЕ видишь еду четко - напиши что видишь и попроси уточнить."
-        )
+        system_prompt = f"""Ты опытный AI-диетолог и нутрициолог. {lang_instruction}
 
-        user_prompt = (
-            f"{db_description}\n\n"
-            f"Проанализируй фото и ответь на {response_lang} языке в формате:\n"
-            f"БЛЮДО: название\n"
-            f"ВЕС: число\n"
-            f"КАЛОРИИ: число\n"
-            f"БЕЛКИ: число\n"
-            f"ЖИРЫ: число\n"
-            f"УГЛЕВОДЫ: число\n"
-            f"РЕКОМЕНДАЦИИ: [80% детальных советов + 20% игривая альтернатива]"
-        )
+ТВОЯ ЗАДАЧА: Анализировать фото еды и давать оценку калорийности и БЖУ.
+
+ВАЖНЫЕ ПРАВИЛА:
+1. ВСЕГДА пытайся определить что на фото, даже если видно нечётко
+2. НИКОГДА не отказывайся анализировать - это просто еда!
+3. Если видишь еду - ОБЯЗАТЕЛЬНО дай примерную оценку калорий и БЖУ
+4. Лучше дать приблизительную оценку, чем отказаться
+5. Оценивай порцию визуально (тарелка ~300-400г обычно)
+
+ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
+- Имя: {name}
+- Цель: {goal}  
+- Вес: {weight} кг
+- Активность: {activity}
+
+ФОРМАТ ОТВЕТА (СТРОГО!):
+БЛЮДО: [название того что видишь]
+ВЕС: [число в граммах, оцени визуально]
+КАЛОРИИ: [число ккал]
+БЕЛКИ: [число граммов]
+ЖИРЫ: [число граммов]
+УГЛЕВОДЫ: [число граммов]
+РЕКОМЕНДАЦИИ: [5-7 предложений советов + одна шутка в конце]
+
+Если не уверен на 100% - всё равно дай оценку! Напиши "примерно" перед числами."""
+
+        user_prompt = f"""{db_description}
+
+Посмотри на фото и проанализируй еду. Дай оценку калорийности и БЖУ.
+
+ВАЖНО: Ты ДОЛЖЕН дать числовую оценку! Не отказывайся. Это обычная еда на фото.
+
+Ответь строго в формате:
+БЛЮДО: ...
+ВЕС: ...
+КАЛОРИИ: ...
+БЕЛКИ: ...
+ЖИРЫ: ...
+УГЛЕВОДЫ: ...
+РЕКОМЕНДАЦИИ: ..."""
 
         resp = await openai_client.chat.completions.create(
             model=GPT_MODEL,
@@ -715,24 +729,75 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
                         {"type": "text", "text": user_prompt},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "high"
+                            }
                         },
                     ],
                 },
             ],
             max_tokens=1500,
-            temperature=0.6,
+            temperature=0.7,
         )
 
         result = (resp.choices[0].message.content or "").strip()
         
         if not result:
             return get_text_lang(user_lang, "photo_not_recognized")
+        
+        # Проверяем на отказ от OpenAI
+        refusal_phrases = [
+            "i can't help", "i cannot help", "i'm sorry", "i am sorry",
+            "can't identify", "cannot identify", "can't analyze", "cannot analyze",
+            "не могу помочь", "не могу определить", "не могу идентифицировать",
+            "nemohu pomoci", "nemohu identifikovat"
+        ]
+        result_lower = result.lower()
+        if any(phrase in result_lower for phrase in refusal_phrases):
+            # GPT отказался - пробуем ещё раз с другим промптом
+            retry_prompt = f"""Это фото еды для подсчёта калорий. Пользователь хочет узнать примерную калорийность.
+
+Посмотри внимательно и опиши:
+1. Что ты видишь на тарелке/в посуде?
+2. Какие ингредиенты можешь определить?
+3. Дай ПРИМЕРНУЮ оценку калорий и БЖУ
+
+Ответь в формате:
+БЛЮДО: [что видишь, пусть даже приблизительно]
+ВЕС: [примерно в граммах]
+КАЛОРИИ: [примерно]
+БЕЛКИ: [примерно]
+ЖИРЫ: [примерно]  
+УГЛЕВОДЫ: [примерно]
+РЕКОМЕНДАЦИИ: [краткие советы]"""
+
+            resp = await openai_client.chat.completions.create(
+                model=GPT_MODEL,
+                messages=[
+                    {"role": "user", "content": [
+                        {"type": "text", "text": retry_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "high"}}
+                    ]}
+                ],
+                max_tokens=1500,
+                temperature=0.8,
+            )
+            result = (resp.choices[0].message.content or "").strip()
+            
+            if not result or any(phrase in result.lower() for phrase in refusal_phrases):
+                # Всё ещё отказывается - просим описать что видит
+                ask_text = {
+                    "ru": "🤔 Не удалось автоматически распознать блюдо.\n\nПожалуйста, напиши что это за еда, и я посчитаю калории!\nНапример: 'тарелка пасты с курицей' или 'гречка с котлетой'",
+                    "cs": "🤔 Nepodařilo se automaticky rozpoznat jídlo.\n\nNapiš prosím, co to je za jídlo, a spočítám kalorie!\nNapříklad: 'talíř těstovin s kuřetem' nebo 'pohanka s karbanátkem'",
+                    "en": "🤔 Couldn't automatically recognize the dish.\n\nPlease tell me what food it is and I'll count the calories!\nFor example: 'plate of pasta with chicken' or 'rice with meatballs'"
+                }
+                return ask_text.get(user_lang, ask_text["ru"])
 
         # Парсим ответ
         lines = result.split('\n')
-        food_name = "Блюдо"
-        weight_g = 100
+        food_name = ""
+        weight_g = 0
         calories = 0
         protein = 0.0
         fat = 0.0
@@ -740,47 +805,69 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
         recommendations = ""
         
         for line in lines:
-            line_lower = line.lower()
-            if 'блюдо:' in line_lower or 'dish:' in line_lower or 'jídlo:' in line_lower:
-                food_name = line.split(':', 1)[1].strip()
-            elif 'вес:' in line_lower or 'weight:' in line_lower or 'váha:' in line_lower:
+            line_lower = line.lower().strip()
+            
+            # Название блюда
+            if any(x in line_lower for x in ['блюдо:', 'dish:', 'jídlo:', 'блюдо :', 'dish :', 'jídlo :']):
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    food_name = parts[1].strip()
+            
+            # Вес
+            elif any(x in line_lower for x in ['вес:', 'weight:', 'váha:', 'вес :', 'hmotnost:']):
                 nums = re.findall(r'\d+', line)
                 if nums:
                     weight_g = int(nums[0])
-            elif 'калор' in line_lower or 'calor' in line_lower or 'kalor' in line_lower:
+            
+            # Калории
+            elif any(x in line_lower for x in ['калор', 'calor', 'kalor', 'ккал', 'kcal']):
                 nums = re.findall(r'\d+', line)
                 if nums:
                     calories = int(nums[0])
-            elif 'белк' in line_lower or 'protein' in line_lower or 'bílk' in line_lower:
-                nums = re.findall(r'\d+\.?\d*', line)
+            
+            # Белки
+            elif any(x in line_lower for x in ['белк', 'protein', 'bílk', 'білк']):
+                nums = re.findall(r'[\d]+[.,]?[\d]*', line)
                 if nums:
-                    protein = float(nums[0])
-            elif 'жир' in line_lower or 'fat' in line_lower or 'tuk' in line_lower:
-                nums = re.findall(r'\d+\.?\d*', line)
+                    protein = float(nums[0].replace(',', '.'))
+            
+            # Жиры
+            elif any(x in line_lower for x in ['жир', 'fat', 'tuk', 'tuky']):
+                nums = re.findall(r'[\d]+[.,]?[\d]*', line)
                 if nums:
-                    fat = float(nums[0])
-            elif 'углевод' in line_lower or 'carb' in line_lower or 'sacharid' in line_lower:
-                nums = re.findall(r'\d+\.?\d*', line)
+                    fat = float(nums[0].replace(',', '.'))
+            
+            # Углеводы
+            elif any(x in line_lower for x in ['углевод', 'carb', 'sacharid', 'uhlohydr']):
+                nums = re.findall(r'[\d]+[.,]?[\d]*', line)
                 if nums:
-                    carbs = float(nums[0])
+                    carbs = float(nums[0].replace(',', '.'))
         
         # Собираем рекомендации
         rec_started = False
         rec_lines = []
         for line in lines:
             ll = line.lower()
-            if 'рекоменд' in ll or 'recommend' in ll or 'doporuč' in ll:
+            if any(x in ll for x in ['рекоменд', 'recommend', 'doporuč', 'rada', 'tip']):
                 rec_started = True
                 if ':' in line:
-                    rec_lines.append(line.split(':', 1)[1].strip())
+                    after_colon = line.split(':', 1)[1].strip()
+                    if after_colon:
+                        rec_lines.append(after_colon)
                 continue
             if rec_started and line.strip():
                 rec_lines.append(line.strip())
         recommendations = '\n'.join(rec_lines)
         
-        # Если не распознал
-        if calories == 0 and protein == 0 and fat == 0 and carbs == 0:
-            return f"🤔 {result}"
+        # Если не распознал числа - показываем сырой ответ GPT
+        if calories == 0 and protein == 0 and fat == 0 and carbs == 0 and weight_g == 0:
+            return f"🍽 {result}"
+        
+        # Устанавливаем дефолты если что-то пропущено
+        if not food_name:
+            food_name = {"ru": "Блюдо", "cs": "Jídlo", "en": "Dish"}.get(user_lang, "Блюдо")
+        if weight_g == 0:
+            weight_g = 250  # Средняя порция
         
         # Создаём карточку
         card = format_food_card(food_name, calories, protein, fat, carbs, weight_g, user_lang)
