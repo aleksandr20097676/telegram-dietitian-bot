@@ -623,9 +623,9 @@ def format_food_card(food_name: str, calories: int, protein: float, fat: float, 
         "en": "FOOD ANALYSIS"
     }
     labels = {
-        "ru": {"portion": "Порция", "cal": "Калории", "protein": "Белки", "fat": "Жиры", "carbs": "Углеводы"},
-        "cs": {"portion": "Porce", "cal": "Kalorie", "protein": "Bílkoviny", "fat": "Tuky", "carbs": "Sacharidy"},
-        "en": {"portion": "Portion", "cal": "Calories", "protein": "Protein", "fat": "Fat", "carbs": "Carbs"}
+        "ru": {"portion": "Порция", "cal": "Калории", "protein": "Белки", "fat": "Жиры", "carbs": "Углеводы", "kcal": "ккал", "g": "г"},
+        "cs": {"portion": "Porce", "cal": "Kalorie", "protein": "Bílkoviny", "fat": "Tuky", "carbs": "Sacharidy", "kcal": "kcal", "g": "g"},
+        "en": {"portion": "Portion", "cal": "Calories", "protein": "Protein", "fat": "Fat", "carbs": "Carbs", "kcal": "kcal", "g": "g"}
     }
     lbl = labels.get(lang, labels["ru"])
     header = headers.get(lang, headers["ru"])
@@ -635,12 +635,12 @@ def format_food_card(food_name: str, calories: int, protein: float, fat: float, 
         f"║   📊 {header}        ║\n"
         f"╠═══════════════════════════╣\n"
         f"║ 🍽 {food_name}\n"
-        f"║ ⚖️ {lbl['portion']}: ~{weight}г\n"
+        f"║ ⚖️ {lbl['portion']}: ~{weight}{lbl['g']}\n"
         f"║                           ║\n"
-        f"║ 🔥 {lbl['cal']}: {calories} ккал\n"
-        f"║ 🥩 {lbl['protein']}: {protein}г\n"
-        f"║ 🧈 {lbl['fat']}: {fat}г\n"
-        f"║ 🍞 {lbl['carbs']}: {carbs}г\n"
+        f"║ 🔥 {lbl['cal']}: {calories} {lbl['kcal']}\n"
+        f"║ 🥩 {lbl['protein']}: {protein}{lbl['g']}\n"
+        f"║ 🧈 {lbl['fat']}: {fat}{lbl['g']}\n"
+        f"║ 🍞 {lbl['carbs']}: {carbs}{lbl['g']}\n"
         f"╚═══════════════════════════╝"
     )
     return card
@@ -657,67 +657,155 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
         
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
-        db_description = "Примеры из базы продуктов:\n"
-        count = 0
-        for food_name, food_data in FOOD_DATABASE.items():
-            if count >= 15:
-                break
-            db_description += (
-                f"- {food_name}: {food_data['calories']} ккал/{food_data['portion']}, "
-                f"Б:{food_data['protein']}г Ж:{food_data['fat']}г У:{food_data['carbs']}г\n"
-            )
-            count += 1
+        # Язык для ответа - ПОЛНОСТЬЮ РАЗДЕЛЬНЫЕ ПРОМПТЫ
+        if user_lang == "cs":
+            system_prompt = f"""Jsi zkušený AI dietolog a nutricionista.
 
-        # Язык для ответа
-        lang_instructions = {
-            "ru": "Отвечай ТОЛЬКО на русском языке!",
-            "cs": "Odpovídej POUZE v češtině!",
-            "en": "Respond ONLY in English!"
-        }
-        lang_instruction = lang_instructions.get(user_lang, lang_instructions["ru"])
+🚨 KRITICKY DŮLEŽITÉ - JAZYK:
+- Odpovídej VÝHRADNĚ ČESKY!
+- Název jídla MUSÍ být česky (např. "Těstoviny s masem", NE "Макароны")
+- Doporučení MUSÍ být česky
+- NIKDY nepoužívej ruštinu ani angličtinu!
 
-        system_prompt = f"""Ты опытный AI-диетолог и нутрициолог. {lang_instruction}
+TVŮJ ÚKOL: Analyzovat fotku jídla a odhadnout kalorie a makra.
+
+PRAVIDLA:
+1. VŽDY urči, co je na fotce
+2. NIKDY neodmítej - je to jen jídlo!
+3. Dej odhad kalorií a makra
+4. Odhadni porci vizuálně (talíř ~300-400g)
+
+PROFIL UŽIVATELE:
+- Jméno: {name}
+- Cíl: {goal}
+- Váha: {weight} kg
+- Aktivita: {activity}
+
+FORMÁT ODPOVĚDI (VŠE ČESKY!):
+JÍDLO: [český název, např. "Kuřecí řízek s bramborami"]
+VÁHA: [číslo v gramech]
+KALORIE: [číslo]
+BÍLKOVINY: [číslo]
+TUKY: [číslo]
+SACHARIDY: [číslo]
+DOPORUČENÍ: [5-7 vět česky + vtip]"""
+
+            user_prompt = """Analyzuj fotku jídla.
+
+🚨 ODPOVÍDEJ POUZE ČESKY! Název jídla piš česky (např. "Hovězí guláš", "Smažený sýr").
+
+Formát:
+JÍDLO: [česky]
+VÁHA: [g]
+KALORIE: [kcal]
+BÍLKOVINY: [g]
+TUKY: [g]
+SACHARIDY: [g]
+DOPORUČENÍ: [česky]"""
+
+        elif user_lang == "en":
+            system_prompt = f"""You are an experienced AI dietitian and nutritionist.
+
+🚨 CRITICALLY IMPORTANT - LANGUAGE:
+- Respond EXCLUSIVELY IN ENGLISH!
+- Dish name MUST be in English (e.g. "Pasta with meat", NOT "Макароны")
+- Recommendations MUST be in English
+- NEVER use Russian or Czech!
+
+YOUR TASK: Analyze food photo and estimate calories and macros.
+
+RULES:
+1. ALWAYS identify what's in the photo
+2. NEVER refuse - it's just food!
+3. Give calorie and macro estimates
+4. Estimate portion visually (plate ~300-400g)
+
+USER PROFILE:
+- Name: {name}
+- Goal: {goal}
+- Weight: {weight} kg
+- Activity: {activity}
+
+RESPONSE FORMAT (ALL IN ENGLISH!):
+DISH: [English name, e.g. "Chicken breast with rice"]
+WEIGHT: [number in grams]
+CALORIES: [number]
+PROTEIN: [number]
+FAT: [number]
+CARBS: [number]
+RECOMMENDATIONS: [5-7 sentences in English + joke]"""
+
+            user_prompt = """Analyze the food photo.
+
+🚨 RESPOND ONLY IN ENGLISH! Write dish name in English (e.g. "Beef stew", "Fried cheese").
+
+Format:
+DISH: [English]
+WEIGHT: [g]
+CALORIES: [kcal]
+PROTEIN: [g]
+FAT: [g]
+CARBS: [g]
+RECOMMENDATIONS: [English]"""
+
+        else:  # Russian (default)
+            # Только для русского добавляем базу данных продуктов
+            db_description = "Примеры из базы продуктов:\n"
+            count = 0
+            for food_name, food_data in FOOD_DATABASE.items():
+                if count >= 10:
+                    break
+                db_description += (
+                    f"- {food_name}: {food_data['calories']} ккал, "
+                    f"Б:{food_data['protein']}г Ж:{food_data['fat']}г У:{food_data['carbs']}г\n"
+                )
+                count += 1
+
+            system_prompt = f"""Ты опытный AI-диетолог и нутрициолог.
+
+🚨 КРИТИЧЕСКИ ВАЖНО - ЯЗЫК:
+- Отвечай ИСКЛЮЧИТЕЛЬНО НА РУССКОМ!
+- Название блюда ДОЛЖНО быть на русском
+- Рекомендации ДОЛЖНЫ быть на русском
+- НИКОГДА не используй английский или чешский!
 
 ТВОЯ ЗАДАЧА: Анализировать фото еды и давать оценку калорийности и БЖУ.
 
-ВАЖНЫЕ ПРАВИЛА:
-1. ВСЕГДА пытайся определить что на фото, даже если видно нечётко
-2. НИКОГДА не отказывайся анализировать - это просто еда!
-3. Если видишь еду - ОБЯЗАТЕЛЬНО дай примерную оценку калорий и БЖУ
-4. Лучше дать приблизительную оценку, чем отказаться
-5. Оценивай порцию визуально (тарелка ~300-400г обычно)
+ПРАВИЛА:
+1. ВСЕГДА определяй что на фото
+2. НИКОГДА не отказывайся - это просто еда!
+3. Дай оценку калорий и БЖУ
+4. Оценивай порцию визуально (тарелка ~300-400г)
 
 ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
 - Имя: {name}
-- Цель: {goal}  
+- Цель: {goal}
 - Вес: {weight} кг
 - Активность: {activity}
 
-ФОРМАТ ОТВЕТА (СТРОГО!):
-БЛЮДО: [название того что видишь]
-ВЕС: [число в граммах, оцени визуально]
-КАЛОРИИ: [число ккал]
-БЕЛКИ: [число граммов]
-ЖИРЫ: [число граммов]
-УГЛЕВОДЫ: [число граммов]
-РЕКОМЕНДАЦИИ: [5-7 предложений советов + одна шутка в конце]
+{db_description}
 
-Если не уверен на 100% - всё равно дай оценку! Напиши "примерно" перед числами."""
+ФОРМАТ ОТВЕТА (ВСЁ НА РУССКОМ!):
+БЛЮДО: [название на русском, напр. "Курица с рисом"]
+ВЕС: [число в граммах]
+КАЛОРИИ: [число]
+БЕЛКИ: [число]
+ЖИРЫ: [число]
+УГЛЕВОДЫ: [число]
+РЕКОМЕНДАЦИИ: [5-7 предложений на русском + шутка]"""
 
-        user_prompt = f"""{db_description}
+            user_prompt = """Проанализируй фото еды.
 
-Посмотри на фото и проанализируй еду. Дай оценку калорийности и БЖУ.
+🚨 ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ! Название блюда пиши на русском.
 
-ВАЖНО: Ты ДОЛЖЕН дать числовую оценку! Не отказывайся. Это обычная еда на фото.
-
-Ответь строго в формате:
-БЛЮДО: ...
-ВЕС: ...
-КАЛОРИИ: ...
-БЕЛКИ: ...
-ЖИРЫ: ...
-УГЛЕВОДЫ: ...
-РЕКОМЕНДАЦИИ: ..."""
+Формат:
+БЛЮДО: [на русском]
+ВЕС: [г]
+КАЛОРИИ: [ккал]
+БЕЛКИ: [г]
+ЖИРЫ: [г]
+УГЛЕВОДЫ: [г]
+РЕКОМЕНДАЦИИ: [на русском]"""
 
         resp = await openai_client.chat.completions.create(
             model=GPT_MODEL,
@@ -751,26 +839,59 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
             "i can't help", "i cannot help", "i'm sorry", "i am sorry",
             "can't identify", "cannot identify", "can't analyze", "cannot analyze",
             "не могу помочь", "не могу определить", "не могу идентифицировать",
-            "nemohu pomoci", "nemohu identifikovat"
+            "nemohu pomoci", "nemohu identifikovat", "nedokážu"
         ]
         result_lower = result.lower()
         if any(phrase in result_lower for phrase in refusal_phrases):
-            # GPT отказался - пробуем ещё раз с другим промптом
-            retry_prompt = f"""Это фото еды для подсчёта калорий. Пользователь хочет узнать примерную калорийность.
+            # GPT отказался - пробуем ещё раз с другим промптом на нужном языке
+            if user_lang == "cs":
+                retry_prompt = """Toto je fotka jídla pro počítání kalorií. Uživatel chce znát přibližnou kalorickou hodnotu.
+
+Podívej se pozorně a popiš:
+1. Co vidíš na talíři/v nádobě?
+2. Jaké ingredience můžeš určit?
+3. Dej PŘIBLIŽNÝ odhad kalorií a makra
+
+ODPOVĚZ ČESKY v tomto formátu:
+JÍDLO: [co vidíš, i přibližně]
+VÁHA: [přibližně v gramech]
+KALORIE: [přibližně]
+BÍLKOVINY: [přibližně]
+TUKY: [přibližně]
+SACHARIDY: [přibližně]
+DOPORUČENÍ: [krátké rady ČESKY]"""
+            elif user_lang == "en":
+                retry_prompt = """This is a food photo for calorie counting. User wants to know approximate calorie content.
+
+Look carefully and describe:
+1. What do you see on the plate/in the dish?
+2. What ingredients can you identify?
+3. Give APPROXIMATE calorie and macro estimates
+
+RESPOND IN ENGLISH in this format:
+DISH: [what you see, even approximately]
+WEIGHT: [approximately in grams]
+CALORIES: [approximately]
+PROTEIN: [approximately]
+FAT: [approximately]
+CARBS: [approximately]
+RECOMMENDATIONS: [brief advice IN ENGLISH]"""
+            else:
+                retry_prompt = """Это фото еды для подсчёта калорий. Пользователь хочет узнать примерную калорийность.
 
 Посмотри внимательно и опиши:
 1. Что ты видишь на тарелке/в посуде?
 2. Какие ингредиенты можешь определить?
 3. Дай ПРИМЕРНУЮ оценку калорий и БЖУ
 
-Ответь в формате:
+ОТВЕТЬ НА РУССКОМ в формате:
 БЛЮДО: [что видишь, пусть даже приблизительно]
 ВЕС: [примерно в граммах]
 КАЛОРИИ: [примерно]
 БЕЛКИ: [примерно]
-ЖИРЫ: [примерно]  
+ЖИРЫ: [примерно]
 УГЛЕВОДЫ: [примерно]
-РЕКОМЕНДАЦИИ: [краткие советы]"""
+РЕКОМЕНДАЦИИ: [краткие советы НА РУССКОМ]"""
 
             resp = await openai_client.chat.completions.create(
                 model=GPT_MODEL,
