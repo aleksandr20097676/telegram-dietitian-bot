@@ -884,8 +884,8 @@ async def create_checkout_session(user_id: int, plan: str, lang: str) -> Optiona
                 "quantity": 1,
             }],
             mode="subscription",
-            success_url=f"https://t.me/your_bot?start=payment_success",  # Заменить на реальный URL
-            cancel_url=f"https://t.me/your_bot?start=payment_cancel",
+            success_url=f"https://t.me/dietolog_ai_2025_bot?start=payment_success",
+            cancel_url=f"https://t.me/dietolog_ai_2025_bot?start=payment_cancel",
             metadata={
                 "user_id": str(user_id),
                 "plan": plan
@@ -1235,6 +1235,38 @@ async def cmd_start(message: Message, state: FSMContext):
     """Start with language selection"""
     user_id = message.from_user.id
     await state.clear()
+    
+    # Обработка deep link после оплаты
+    args = message.text.split()
+    if len(args) > 1:
+        param = args[1]
+        user_lang = await get_fact(user_id, "language") or "ru"
+        
+        if param == "payment_success":
+            # Проверяем подписку
+            is_valid, plan = await check_subscription_valid(user_id)
+            if is_valid:
+                name = await get_fact(user_id, "name") or "друг"
+                menu = create_main_menu(user_lang)
+                await message.answer(
+                    f"🎉 Отлично, {name}!\n\n"
+                    f"Твоя подписка активирована. Теперь ты можешь пользоваться всеми функциями бота!\n\n"
+                    f"📸 Отправь фото еды для анализа",
+                    reply_markup=menu
+                )
+            else:
+                await message.answer(
+                    "⏳ Подписка обрабатывается...\n\n"
+                    "Подожди несколько секунд и отправь /start"
+                )
+            return
+        
+        elif param == "payment_cancel":
+            await message.answer(
+                "❌ Оплата отменена\n\n"
+                "Если хочешь попробовать снова, напиши /subscribe"
+            )
+            return
 
     missing = await profile_missing(user_id)
     
