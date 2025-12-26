@@ -1010,53 +1010,42 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
         
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
-        db_description = "Примеры из базы продуктов:\n"
-        count = 0
-        for food_name, food_data in FOOD_DATABASE.items():
-            if count >= 15:
-                break
-            db_description += (
-                f"- {food_name}: {food_data['calories']} ккал/{food_data['portion']}, "
-                f"Б:{food_data['protein']}г Ж:{food_data['fat']}г У:{food_data['carbs']}г\n"
-            )
-            count += 1
-
         response_lang = get_text_lang(user_lang, "gpt_response_lang")
 
-        system_prompt = (
-            f"Ты дружелюбный AI-диетолог. Отвечай ТОЛЬКО на {response_lang} языке!\n\n"
-            f"ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:\n"
-            f"- Имя: {name}\n"
-            f"- Цель: {goal}\n"
-            f"- Текущий вес: {weight} кг\n"
-            f"- Активность: {activity}\n\n"
-            f"ВАЖНО: Если не уверен что именно на фото:\n"
-            f"- Напиши что видишь частично\n"
-            f"- Перечисли что определил\n"
-            f"- Попроси уточнить остальное\n"
-            f"- НЕ ВЫДАВАЙ нули и пустые данные!\n\n"
-            f"ФОРМАТ ОТВЕТА:\n"
-            f"1. Название блюда (или 'Частично определено')\n"
-            f"2. Вес порции в граммах (или 0 если не определил)\n"
-            f"3. Калории (или 0 если не уверен)\n"
-            f"4. Белки, жиры, углеводы (или 0 если не уверен)\n"
-            f"5. РЕКОМЕНДАЦИИ (ВАЖНО!):\n"
-            f"   80% - Детальные серьёзные советы (5-7 предложений)\n"
-            f"   20% - В КОНЦЕ короткая игривая альтернатива\n\n"
-            f"Если НЕ видишь еду четко - напиши что видишь и попроси уточнить."
-        )
+        system_prompt = f"""Ты опытный диетолог-нутрициолог. Анализируй фото еды и давай точную оценку.
 
-        user_prompt = (
-            f"{db_description}\n\n"
-            f"Проанализируй фото и ответь на {response_lang} языке в формате:\n"
-            f"БЛЮДО: название\n"
-            f"ВЕС: число\n"
-            f"КАЛОРИИ: число\n"
-            f"БЕЛКИ: число\n"
-            f"ЖИРЫ: число\n"
-            f"УГЛЕВОДЫ: число\n"
-            f"РЕКОМЕНДАЦИИ: [80% детальных советов + 20% игривая альтернатива]"
-        )
+ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
+- Имя: {name}
+- Цель: {goal}
+- Вес: {weight} кг
+- Активность: {activity}
+
+ТВОЯ ЗАДАЧА:
+1. Определи что за блюдо/продукты на фото
+2. Оцени размер порции в граммах (визуально, сравни с тарелкой)
+3. Рассчитай КБЖУ для этой порции
+4. Дай полезные рекомендации
+
+ВАЖНО - ОТВЕЧАЙ СТРОГО В ТАКОМ ФОРМАТЕ:
+НАЗВАНИЕ: [название блюда]
+ПОРЦИЯ: [число] г
+ККАЛ: [число]
+БЕЛКИ: [число] г
+ЖИРЫ: [число] г
+УГЛЕВОДЫ: [число] г
+РЕКОМЕНДАЦИИ: [твои советы]
+
+ПРАВИЛА:
+- Порция обычной тарелки еды = 250-400г
+- Если видишь мясо/рыбу — это минимум 150-200г и 200-400 ккал
+- Если видишь кашу/гарнир — это 150-250г и 150-300 ккал
+- Если видишь салат — это 200-350г и 100-250 ккал
+- НЕ ПИШИ 3 ккал или 2г — это нереалистично для еды!
+- Минимум для любой еды: 50 ккал
+
+Отвечай на {response_lang} языке."""
+
+        user_prompt = "Проанализируй это блюдо. Дай реалистичную оценку КБЖУ."
 
         resp = await openai_client.chat.completions.create(
             model=GPT_MODEL,
@@ -1068,52 +1057,70 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
                         {"type": "text", "text": user_prompt},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "high"}
                         },
                     ],
                 },
             ],
             max_tokens=1500,
-            temperature=0.6,
+            temperature=0.3,
         )
 
         result = (resp.choices[0].message.content or "").strip()
+        logger.info(f"GPT Response: {result[:500]}")
         
         if not result:
             return get_text_lang(user_lang, "photo_not_recognized")
 
-        # Парсим ответ
-        lines = result.split('\n')
+        # Парсим ответ - ищем числа после ключевых слов
         food_name = "Блюдо"
-        weight_g = 100
+        weight_g = 250
         calories = 0
         protein = 0.0
         fat = 0.0
         carbs = 0.0
         recommendations = ""
         
+        lines = result.split('\n')
+        
         for line in lines:
-            line_lower = line.lower()
-            if 'блюдо:' in line_lower or 'dish:' in line_lower or 'jídlo:' in line_lower:
-                food_name = line.split(':', 1)[1].strip()
-            elif 'вес:' in line_lower or 'weight:' in line_lower or 'váha:' in line_lower:
-                nums = re.findall(r'\d+', line)
+            line_lower = line.lower().strip()
+            
+            # Название блюда
+            if any(x in line_lower for x in ['название:', 'name:', 'блюдо:', 'dish:', 'jídlo:']):
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    food_name = parts[1].strip()
+            
+            # Порция/вес
+            elif any(x in line_lower for x in ['порция:', 'portion:', 'вес:', 'weight:', 'porce:', 'váha:']):
+                nums = re.findall(r'(\d+)', line)
                 if nums:
                     weight_g = int(nums[0])
-            elif 'калор' in line_lower or 'calor' in line_lower or 'kalor' in line_lower:
-                nums = re.findall(r'\d+', line)
+                    if weight_g < 10:  # Явно ошибка
+                        weight_g = 250
+            
+            # Калории
+            elif any(x in line_lower for x in ['ккал:', 'kcal:', 'калории:', 'calories:', 'kalorie:']):
+                nums = re.findall(r'(\d+)', line)
                 if nums:
                     calories = int(nums[0])
-            elif 'белк' in line_lower or 'protein' in line_lower or 'bílk' in line_lower:
-                nums = re.findall(r'\d+\.?\d*', line)
+            
+            # Белки
+            elif any(x in line_lower for x in ['белки:', 'белок:', 'protein:', 'bílkoviny:']):
+                nums = re.findall(r'(\d+\.?\d*)', line)
                 if nums:
                     protein = float(nums[0])
-            elif 'жир' in line_lower or 'fat' in line_lower or 'tuk' in line_lower:
-                nums = re.findall(r'\d+\.?\d*', line)
+            
+            # Жиры
+            elif any(x in line_lower for x in ['жиры:', 'жир:', 'fat:', 'fats:', 'tuky:']):
+                nums = re.findall(r'(\d+\.?\d*)', line)
                 if nums:
                     fat = float(nums[0])
-            elif 'углевод' in line_lower or 'carb' in line_lower or 'sacharid' in line_lower:
-                nums = re.findall(r'\d+\.?\d*', line)
+            
+            # Углеводы
+            elif any(x in line_lower for x in ['углеводы:', 'carbs:', 'carbohydrates:', 'sacharidy:']):
+                nums = re.findall(r'(\d+\.?\d*)', line)
                 if nums:
                     carbs = float(nums[0])
         
@@ -1122,16 +1129,30 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
         rec_lines = []
         for line in lines:
             ll = line.lower()
-            if 'рекоменд' in ll or 'recommend' in ll or 'doporuč' in ll:
+            if any(x in ll for x in ['рекоменд', 'recommend', 'doporuč', 'советы', 'tips']):
                 rec_started = True
                 if ':' in line:
-                    rec_lines.append(line.split(':', 1)[1].strip())
+                    after_colon = line.split(':', 1)[1].strip()
+                    if after_colon:
+                        rec_lines.append(after_colon)
                 continue
             if rec_started and line.strip():
                 rec_lines.append(line.strip())
         recommendations = '\n'.join(rec_lines)
         
-        # Если не распознал
+        # Проверка на нереалистичные значения
+        if calories < 20:
+            # Попробуем найти калории по-другому
+            all_nums = re.findall(r'(\d{2,4})\s*(?:ккал|kcal|калор)', result.lower())
+            if all_nums:
+                calories = int(all_nums[0])
+            else:
+                # Оценим по БЖУ
+                calories = int(protein * 4 + fat * 9 + carbs * 4)
+                if calories < 50:
+                    calories = 200  # Дефолт для еды
+        
+        # Если совсем не распознал
         if calories == 0 and protein == 0 and fat == 0 and carbs == 0:
             return f"🤔 {result}"
         
