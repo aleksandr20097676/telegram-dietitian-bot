@@ -41,6 +41,13 @@ from db import init_db, ensure_user_exists, set_fact, set_facts, get_fact, delet
 # -------------------- Stripe Configuration --------------------
 stripe.api_key = STRIPE_SECRET_KEY
 
+# -------------------- Admin Configuration --------------------
+# Админы имеют бесплатный безлимитный доступ
+# Добавляй ID через запятую в переменной ADMIN_IDS в Railway
+import os
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "1642251041")  # По умолчанию твой ID
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit()]
+
 # -------------------- logging --------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -785,6 +792,10 @@ async def check_subscription_valid(user_id: int) -> Tuple[bool, Optional[str]]:
     Проверить активна ли подписка
     Returns: (is_valid, plan_or_error_key)
     """
+    # Админы имеют бесплатный доступ
+    if user_id in ADMIN_IDS:
+        return True, "admin"
+    
     sub = await get_subscription(user_id)
     if not sub:
         return False, "subscription_required"
@@ -838,6 +849,10 @@ async def can_analyze_photo(user_id: int) -> Tuple[bool, Optional[str]]:
     Проверить может ли пользователь анализировать фото
     Returns: (can_analyze, error_key_if_not)
     """
+    # Админы - безлимит
+    if user_id in ADMIN_IDS:
+        return True, None
+    
     # Проверяем подписку
     is_valid, plan_or_error = await check_subscription_valid(user_id)
     if not is_valid:
@@ -845,8 +860,8 @@ async def can_analyze_photo(user_id: int) -> Tuple[bool, Optional[str]]:
     
     plan = plan_or_error
     
-    # Premium и trial - безлимит
-    if plan in ["premium", "trial"]:
+    # Premium, trial, admin и granted - безлимит
+    if plan in ["premium", "trial", "admin", "granted"]:
         return True, None
     
     # Basic - проверяем лимит
@@ -1319,6 +1334,16 @@ async def cmd_status(message: Message):
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
     
+    # Админы
+    if user_id in ADMIN_IDS:
+        await message.answer(
+            "👑 Статус: АДМИН\n\n"
+            "📦 Тариф: Бесплатный безлимит\n"
+            "📅 Действует: Навсегда\n"
+            "📸 Фото: ∞"
+        )
+        return
+    
     sub = await get_subscription(user_id)
     
     if not sub:
@@ -1329,12 +1354,12 @@ async def cmd_status(message: Message):
     expires_at = datetime.fromisoformat(sub["expires_at"])
     expires_str = expires_at.strftime("%d.%m.%Y")
     
-    plan_names = {"basic": "Basic", "premium": "Premium", "trial": "Trial"}
+    plan_names = {"basic": "Basic", "premium": "Premium", "trial": "Trial", "granted": "🎁 Подарочный"}
     plan_name = plan_names.get(plan, plan.capitalize())
     
     # Получаем использование
     used = await get_daily_photo_count(user_id)
-    limit = "∞" if plan == "premium" else str(BASIC_DAILY_PHOTO_LIMIT)
+    limit = "∞" if plan in ["premium", "granted"] else str(BASIC_DAILY_PHOTO_LIMIT)
     
     await message.answer(
         get_text_lang(user_lang, "subscription_status", 
@@ -1374,6 +1399,76 @@ async def cmd_help(message: Message):
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
     await message.answer(get_text_lang(user_lang, "help_text"))
+
+
+# -------------------- Admin commands --------------------
+@dp.message(Command("grant"))
+async def cmd_grant(message: Message):
+    """Выдать бесплатный доступ пользователю (только для админов)"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.answer("⛔ Эта команда только для админов")
+        return
+    
+    # Парсим ID из команды: /grant 123456789
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer(
+            "📝 Использование: /grant <user_id>\n\n"
+            "Пример: /grant 123456789\n\n"
+            "Чтобы узнать ID пользователя, попроси его написать боту @getmyid_bot"
+        )
+        return
+    
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный ID. Используй числовой ID пользователя.")
+        return
+    
+    # Выдаём бессрочную подписку
+    await set_subscription(
+        target_id,
+        plan="granted",
+        expires_at=datetime(2099, 12, 31),
+        stripe_customer_id=None,
+        stripe_subscription_id=None
+    )
+    
+    await message.answer(f"✅ Бесплатный доступ выдан пользователю {target_id}")
+
+
+@dp.message(Command("revoke"))
+async def cmd_revoke(message: Message):
+    """Отозвать бесплатный доступ (только для админов)"""
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.answer("⛔ Эта команда только для админов")
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("📝 Использование: /revoke <user_id>")
+        return
+    
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Неверный ID")
+        return
+    
+    # Отзываем подписку
+    await set_subscription(
+        target_id,
+        plan="revoked",
+        expires_at=datetime.now(),
+        stripe_customer_id=None,
+        stripe_subscription_id=None
+    )
+    
+    await message.answer(f"✅ Доступ отозван у пользователя {target_id}")
 
 
 # -------------------- onboarding: name --------------------
@@ -1549,6 +1644,14 @@ async def onboarding_activity_callback(callback: CallbackQuery, state: FSMContex
     await state.clear()
     await callback.answer()
     
+    # Админы получают доступ сразу без подписки
+    if user_id in ADMIN_IDS:
+        await callback.message.answer(
+            "🎉 Регистрация завершена!\n\nКак админ, у тебя полный бесплатный доступ!",
+            reply_markup=create_main_menu(user_lang)
+        )
+        return
+    
     # Онбординг завершён - показываем выбор подписки
     complete_msg = get_text_lang(user_lang, "onboarding_complete")
     await callback.message.answer(complete_msg)
@@ -1590,6 +1693,14 @@ async def onboarding_activity_text(message: Message, state: FSMContext):
 
     await set_facts(user_id, {"activity": activity, "job": ""})
     await state.clear()
+    
+    # Админы получают доступ сразу без подписки
+    if user_id in ADMIN_IDS:
+        await message.answer(
+            "🎉 Регистрация завершена!\n\nКак админ, у тебя полный бесплатный доступ!",
+            reply_markup=create_main_menu(user_lang)
+        )
+        return
     
     # Показываем выбор подписки
     complete_msg = get_text_lang(user_lang, "onboarding_complete")
