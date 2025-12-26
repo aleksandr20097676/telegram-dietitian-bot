@@ -142,7 +142,8 @@ TEXTS = {
             "• Безлимитные анализы фото\n"
             "• Приоритетная поддержка\n"
             "• Все функции Basic\n\n"
-            "🎁 Первый день — БЕСПЛАТНО!"
+            "🎁 Первый день — БЕСПЛАТНО!\n\n"
+            "💡 Отменить подписку можно в любой момент: /cancel"
         ),
         "btn_basic": "📦 Basic — €10/мес",
         "btn_premium": "⭐ Premium — €20/мес",
@@ -151,13 +152,15 @@ TEXTS = {
             "✅ Подписка активирована!\n\n"
             "📦 Тариф: {plan}\n"
             "📅 Действует до: {expires}\n\n"
-            "Теперь ты можешь пользоваться ботом! 🎉"
+            "Теперь ты можешь пользоваться ботом! 🎉\n\n"
+            "💡 Отменить подписку: /cancel"
         ),
         "subscription_status": (
             "📊 Твоя подписка:\n\n"
             "📦 Тариф: {plan}\n"
             "📅 Действует до: {expires}\n"
-            "📸 Фото сегодня: {used}/{limit}"
+            "📸 Фото сегодня: {used}/{limit}\n\n"
+            "❌ Отменить подписку: /cancel"
         ),
         "photo_limit_reached": (
             "⚠️ Ты достиг лимита анализов на сегодня ({limit}).\n\n"
@@ -250,6 +253,7 @@ TEXTS = {
             "/start — начать или продолжить\n"
             "/subscribe — управление подпиской\n"
             "/status — статус подписки\n"
+            "/cancel — отменить подписку\n"
             "reset — сбросить анкету\n\n"
             "💬 Можно:\n"
             "• Задавать вопросы про питание\n"
@@ -327,7 +331,8 @@ TEXTS = {
             "• Neomezené analýzy fotek\n"
             "• Prioritní podpora\n"
             "• Všechny funkce Basic\n\n"
-            "🎁 První den — ZDARMA!"
+            "🎁 První den — ZDARMA!\n\n"
+            "💡 Zrušit předplatné můžeš kdykoliv: /cancel"
         ),
         "btn_basic": "📦 Basic — €10/měs",
         "btn_premium": "⭐ Premium — €20/měs",
@@ -336,13 +341,15 @@ TEXTS = {
             "✅ Předplatné aktivováno!\n\n"
             "📦 Tarif: {plan}\n"
             "📅 Platí do: {expires}\n\n"
-            "Teď můžeš používat bota! 🎉"
+            "Teď můžeš používat bota! 🎉\n\n"
+            "💡 Zrušit předplatné: /cancel"
         ),
         "subscription_status": (
             "📊 Tvé předplatné:\n\n"
             "📦 Tarif: {plan}\n"
             "📅 Platí do: {expires}\n"
-            "📸 Fotek dnes: {used}/{limit}"
+            "📸 Fotek dnes: {used}/{limit}\n\n"
+            "❌ Zrušit předplatné: /cancel"
         ),
         "photo_limit_reached": (
             "⚠️ Dosáhl jsi denního limitu analýz ({limit}).\n\n"
@@ -435,6 +442,7 @@ TEXTS = {
             "/start — začít nebo pokračovat\n"
             "/subscribe — správa předplatného\n"
             "/status — stav předplatného\n"
+            "/cancel — zrušit předplatné\n"
             "reset — resetovat profil\n\n"
             "💬 Můžeš:\n"
             "• Ptát se na výživu\n"
@@ -512,7 +520,8 @@ TEXTS = {
             "• Unlimited photo analyses\n"
             "• Priority support\n"
             "• All Basic features\n\n"
-            "🎁 First day — FREE!"
+            "🎁 First day — FREE!\n\n"
+            "💡 Cancel anytime: /cancel"
         ),
         "btn_basic": "📦 Basic — €10/mo",
         "btn_premium": "⭐ Premium — €20/mo",
@@ -521,13 +530,15 @@ TEXTS = {
             "✅ Subscription activated!\n\n"
             "📦 Plan: {plan}\n"
             "📅 Valid until: {expires}\n\n"
-            "You can now use the bot! 🎉"
+            "You can now use the bot! 🎉\n\n"
+            "💡 Cancel subscription: /cancel"
         ),
         "subscription_status": (
             "📊 Your subscription:\n\n"
             "📦 Plan: {plan}\n"
             "📅 Valid until: {expires}\n"
-            "📸 Photos today: {used}/{limit}"
+            "📸 Photos today: {used}/{limit}\n\n"
+            "❌ Cancel subscription: /cancel"
         ),
         "photo_limit_reached": (
             "⚠️ You've reached your daily analysis limit ({limit}).\n\n"
@@ -620,6 +631,7 @@ TEXTS = {
             "/start — start or continue\n"
             "/subscribe — manage subscription\n"
             "/status — subscription status\n"
+            "/cancel — cancel subscription\n"
             "reset — reset profile\n\n"
             "💬 You can:\n"
             "• Ask about nutrition\n"
@@ -1397,6 +1409,48 @@ async def cmd_status(message: Message):
         get_text_lang(user_lang, "subscription_status", 
                      plan=plan_name, expires=expires_str, used=used, limit=limit)
     )
+
+
+# -------------------- /cancel --------------------
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: Message):
+    """Cancel subscription - создаёт ссылку на Stripe Customer Portal"""
+    user_id = message.from_user.id
+    user_lang = await get_fact(user_id, "language") or "ru"
+    
+    sub = await get_subscription(user_id)
+    
+    if not sub:
+        await message.answer("❌ У тебя нет активной подписки")
+        return
+    
+    # Проверяем есть ли stripe_customer_id
+    customer_id = sub.get("stripe_customer_id")
+    
+    if not customer_id:
+        # Подарочная или ручная подписка
+        await message.answer("ℹ️ Твоя подписка не связана со Stripe. Обратись к администратору.")
+        return
+    
+    try:
+        # Создаём сессию Customer Portal
+        portal_session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=f"https://t.me/dietolog_ai_2025_bot"
+        )
+        
+        cancel_texts = {
+            "ru": "🔗 Для управления подпиской перейди по ссылке:\n\n{url}\n\nТам ты сможешь:\n• Отменить подписку\n• Изменить способ оплаты\n• Посмотреть историю платежей",
+            "cs": "🔗 Pro správu předplatného klikni na odkaz:\n\n{url}\n\nTam můžeš:\n• Zrušit předplatné\n• Změnit způsob platby\n• Zobrazit historii plateb",
+            "en": "🔗 To manage your subscription, click the link:\n\n{url}\n\nThere you can:\n• Cancel subscription\n• Change payment method\n• View payment history"
+        }
+        
+        text = cancel_texts.get(user_lang, cancel_texts["ru"]).format(url=portal_session.url)
+        await message.answer(text)
+        
+    except Exception as e:
+        logger.error(f"Error creating portal session: {e}")
+        await message.answer("❌ Ошибка. Попробуй позже или обратись к администратору.")
 
 
 @dp.callback_query(LanguageSelection.waiting_language)
