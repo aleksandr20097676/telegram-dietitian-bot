@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Telegram Dietitian Bot - ПОЛНАЯ МУЛЬТИЯЗЫЧНОСТЬ
-✅ Выбор языка при старте
-✅ ВСЕ тексты на 3 языках (RU/CS/EN)
-✅ Меню на выбранном языке
-✅ Улучшенное распознавание фото
-✅ Серьёзные рекомендации (80%) + шутка (20%)
+Telegram Dietitian Bot - С ПОДПИСКАМИ STRIPE
+✅ Два тарифа: Basic (€10) и Premium (€20)
+✅ 1 день бесплатный пробный период
+✅ Лимит фото для Basic: 10/день
+✅ Premium: безлимит
+✅ Мультиязычность (RU/CS/EN)
 """
 
 import asyncio
@@ -13,9 +13,11 @@ import logging
 import base64
 import re
 import json
+import stripe
 from io import BytesIO
 from typing import Optional, Tuple
 from datetime import datetime, timedelta
+from aiohttp import web
 
 import httpx
 from openai import AsyncOpenAI
@@ -27,10 +29,17 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from config import TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL
+from config import (
+    TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL,
+    STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
+    STRIPE_PRICE_BASIC, STRIPE_PRICE_PREMIUM,
+    BASIC_DAILY_PHOTO_LIMIT, TRIAL_DAYS
+)
 from database import FOOD_DATABASE
 from db import init_db, ensure_user_exists, set_fact, set_facts, get_fact, delete_all_facts
 
+# -------------------- Stripe Configuration --------------------
+stripe.api_key = STRIPE_SECRET_KEY
 
 # -------------------- logging --------------------
 logging.basicConfig(
@@ -39,16 +48,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dietitian-bot")
 
-
 # -------------------- OpenAI client --------------------
 http_client = httpx.AsyncClient(timeout=60.0)
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, http_client=http_client)
 
-
 # -------------------- aiogram --------------------
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
 
 # -------------------- FSM states --------------------
 class LanguageSelection(StatesGroup):
@@ -62,7 +68,6 @@ class Onboarding(StatesGroup):
 
 class WeightTracking(StatesGroup):
     waiting_weight = State()
-
 
 # -------------------- ПОЛНЫЕ ТЕКСТЫ НА 3 ЯЗЫКАХ --------------------
 TEXTS = {
@@ -107,12 +112,55 @@ TEXTS = {
         "activity_high_value": "высокая",
         "onboarding_complete": (
             "Отлично! Теперь я знаю о тебе всё необходимое! 🎉\n\n"
-            "Что могу для тебя сделать:\n"
-            "📸 Пришли фото еды - я посчитаю калории\n"
-            "💬 Задай вопрос о питании\n"
-            "📋 Попроси составить план питания\n"
-            "💪 Подберу программу тренировок\n\n"
-            "С чего начнём?"
+            "Для использования бота необходима подписка.\n"
+            "Нажми кнопку ниже чтобы выбрать тариф!"
+        ),
+        
+        # ПОДПИСКИ
+        "subscription_required": (
+            "⚠️ Для использования бота необходима подписка.\n\n"
+            "Нажми /subscribe чтобы выбрать тариф."
+        ),
+        "subscription_expired": (
+            "⚠️ Твоя подписка истекла.\n\n"
+            "Нажми /subscribe чтобы продлить."
+        ),
+        "choose_plan": (
+            "💳 Выбери тариф:\n\n"
+            "📦 **Basic** — €10/месяц\n"
+            "• До 10 анализов фото в день\n"
+            "• Планы питания\n"
+            "• Программы тренировок\n\n"
+            "⭐ **Premium** — €20/месяц\n"
+            "• Безлимитные анализы фото\n"
+            "• Приоритетная поддержка\n"
+            "• Все функции Basic\n\n"
+            "🎁 Первый день — БЕСПЛАТНО!"
+        ),
+        "btn_basic": "📦 Basic — €10/мес",
+        "btn_premium": "⭐ Premium — €20/мес",
+        "payment_link": "💳 Перейди по ссылке для оплаты:\n{url}\n\nПосле оплаты бот автоматически активирует подписку!",
+        "subscription_activated": (
+            "✅ Подписка активирована!\n\n"
+            "📦 Тариф: {plan}\n"
+            "📅 Действует до: {expires}\n\n"
+            "Теперь ты можешь пользоваться ботом! 🎉"
+        ),
+        "subscription_status": (
+            "📊 Твоя подписка:\n\n"
+            "📦 Тариф: {plan}\n"
+            "📅 Действует до: {expires}\n"
+            "📸 Фото сегодня: {used}/{limit}"
+        ),
+        "photo_limit_reached": (
+            "⚠️ Ты достиг лимита анализов на сегодня ({limit}).\n\n"
+            "Обнови подписку до Premium для безлимитных анализов!\n"
+            "/subscribe"
+        ),
+        "trial_started": (
+            "🎁 Пробный период активирован!\n\n"
+            "У тебя есть 1 день бесплатного доступа.\n"
+            "После этого нужно будет оформить подписку."
         ),
         
         # Меню кнопки
@@ -193,6 +241,8 @@ TEXTS = {
         "help_text": (
             "📋 Команды:\n"
             "/start — начать или продолжить\n"
+            "/subscribe — управление подпиской\n"
+            "/status — статус подписки\n"
             "reset — сбросить анкету\n\n"
             "💬 Можно:\n"
             "• Задавать вопросы про питание\n"
@@ -247,12 +297,55 @@ TEXTS = {
         "activity_high_value": "vysoká",
         "onboarding_complete": (
             "Skvělé! Teď o tobě vím vše potřebné! 🎉\n\n"
-            "Co pro tebe můžu udělat:\n"
-            "📸 Pošli fotku jídla - spočítám kalorie\n"
-            "💬 Zeptej se na výživu\n"
-            "📋 Požádej o jídelní plán\n"
-            "💪 Navrhnu tréninkový program\n\n"
-            "Čím začneme?"
+            "Pro používání bota je potřeba předplatné.\n"
+            "Klikni na tlačítko níže pro výběr tarifu!"
+        ),
+        
+        # PŘEDPLATNÉ
+        "subscription_required": (
+            "⚠️ Pro používání bota je potřeba předplatné.\n\n"
+            "Napiš /subscribe pro výběr tarifu."
+        ),
+        "subscription_expired": (
+            "⚠️ Tvé předplatné vypršelo.\n\n"
+            "Napiš /subscribe pro prodloužení."
+        ),
+        "choose_plan": (
+            "💳 Vyber tarif:\n\n"
+            "📦 **Basic** — €10/měsíc\n"
+            "• Až 10 analýz fotek denně\n"
+            "• Jídelní plány\n"
+            "• Tréninkové programy\n\n"
+            "⭐ **Premium** — €20/měsíc\n"
+            "• Neomezené analýzy fotek\n"
+            "• Prioritní podpora\n"
+            "• Všechny funkce Basic\n\n"
+            "🎁 První den — ZDARMA!"
+        ),
+        "btn_basic": "📦 Basic — €10/měs",
+        "btn_premium": "⭐ Premium — €20/měs",
+        "payment_link": "💳 Přejdi na odkaz pro platbu:\n{url}\n\nPo platbě bot automaticky aktivuje předplatné!",
+        "subscription_activated": (
+            "✅ Předplatné aktivováno!\n\n"
+            "📦 Tarif: {plan}\n"
+            "📅 Platí do: {expires}\n\n"
+            "Teď můžeš používat bota! 🎉"
+        ),
+        "subscription_status": (
+            "📊 Tvé předplatné:\n\n"
+            "📦 Tarif: {plan}\n"
+            "📅 Platí do: {expires}\n"
+            "📸 Fotek dnes: {used}/{limit}"
+        ),
+        "photo_limit_reached": (
+            "⚠️ Dosáhl jsi denního limitu analýz ({limit}).\n\n"
+            "Uprav předplatné na Premium pro neomezené analýzy!\n"
+            "/subscribe"
+        ),
+        "trial_started": (
+            "🎁 Zkušební období aktivováno!\n\n"
+            "Máš 1 den bezplatného přístupu.\n"
+            "Poté bude potřeba předplatné."
         ),
         
         # Menu tlačítka
@@ -333,6 +426,8 @@ TEXTS = {
         "help_text": (
             "📋 Příkazy:\n"
             "/start — začít nebo pokračovat\n"
+            "/subscribe — správa předplatného\n"
+            "/status — stav předplatného\n"
             "reset — resetovat profil\n\n"
             "💬 Můžeš:\n"
             "• Ptát se na výživu\n"
@@ -387,12 +482,55 @@ TEXTS = {
         "activity_high_value": "high",
         "onboarding_complete": (
             "Excellent! Now I know everything I need! 🎉\n\n"
-            "What I can do for you:\n"
-            "📸 Send food photo - I'll count calories\n"
-            "💬 Ask about nutrition\n"
-            "📋 Request a meal plan\n"
-            "💪 Get a workout program\n\n"
-            "Where shall we start?"
+            "A subscription is required to use the bot.\n"
+            "Click the button below to choose a plan!"
+        ),
+        
+        # SUBSCRIPTIONS
+        "subscription_required": (
+            "⚠️ A subscription is required to use the bot.\n\n"
+            "Type /subscribe to choose a plan."
+        ),
+        "subscription_expired": (
+            "⚠️ Your subscription has expired.\n\n"
+            "Type /subscribe to renew."
+        ),
+        "choose_plan": (
+            "💳 Choose a plan:\n\n"
+            "📦 **Basic** — €10/month\n"
+            "• Up to 10 photo analyses per day\n"
+            "• Meal plans\n"
+            "• Workout programs\n\n"
+            "⭐ **Premium** — €20/month\n"
+            "• Unlimited photo analyses\n"
+            "• Priority support\n"
+            "• All Basic features\n\n"
+            "🎁 First day — FREE!"
+        ),
+        "btn_basic": "📦 Basic — €10/mo",
+        "btn_premium": "⭐ Premium — €20/mo",
+        "payment_link": "💳 Go to this link to pay:\n{url}\n\nAfter payment, the bot will automatically activate your subscription!",
+        "subscription_activated": (
+            "✅ Subscription activated!\n\n"
+            "📦 Plan: {plan}\n"
+            "📅 Valid until: {expires}\n\n"
+            "You can now use the bot! 🎉"
+        ),
+        "subscription_status": (
+            "📊 Your subscription:\n\n"
+            "📦 Plan: {plan}\n"
+            "📅 Valid until: {expires}\n"
+            "📸 Photos today: {used}/{limit}"
+        ),
+        "photo_limit_reached": (
+            "⚠️ You've reached your daily analysis limit ({limit}).\n\n"
+            "Upgrade to Premium for unlimited analyses!\n"
+            "/subscribe"
+        ),
+        "trial_started": (
+            "🎁 Trial period activated!\n\n"
+            "You have 1 day of free access.\n"
+            "After that, you'll need a subscription."
         ),
         
         # Menu buttons
@@ -473,6 +611,8 @@ TEXTS = {
         "help_text": (
             "📋 Commands:\n"
             "/start — start or continue\n"
+            "/subscribe — manage subscription\n"
+            "/status — subscription status\n"
             "reset — reset profile\n\n"
             "💬 You can:\n"
             "• Ask about nutrition\n"
@@ -615,6 +755,219 @@ def get_days_word(lang: str, days: int) -> str:
             return TEXTS["en"]["day_many"]
 
 
+# ==================== SUBSCRIPTION FUNCTIONS ====================
+
+async def get_subscription(user_id: int) -> Optional[dict]:
+    """Получить информацию о подписке пользователя"""
+    sub_json = await get_fact(user_id, "subscription")
+    if not sub_json:
+        return None
+    try:
+        return json.loads(sub_json)
+    except:
+        return None
+
+
+async def set_subscription(user_id: int, plan: str, expires_at: datetime, stripe_customer_id: str = None, stripe_subscription_id: str = None):
+    """Установить подписку пользователя"""
+    sub_data = {
+        "plan": plan,  # "basic", "premium", "trial"
+        "expires_at": expires_at.isoformat(),
+        "stripe_customer_id": stripe_customer_id,
+        "stripe_subscription_id": stripe_subscription_id,
+        "created_at": datetime.now().isoformat()
+    }
+    await set_fact(user_id, "subscription", json.dumps(sub_data))
+
+
+async def check_subscription_valid(user_id: int) -> Tuple[bool, Optional[str]]:
+    """
+    Проверить активна ли подписка
+    Returns: (is_valid, plan_or_error_key)
+    """
+    sub = await get_subscription(user_id)
+    if not sub:
+        return False, "subscription_required"
+    
+    expires_at = datetime.fromisoformat(sub["expires_at"])
+    if datetime.now() > expires_at:
+        return False, "subscription_expired"
+    
+    return True, sub["plan"]
+
+
+async def get_daily_photo_count(user_id: int) -> int:
+    """Получить количество фото за сегодня"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    usage_json = await get_fact(user_id, "daily_usage")
+    
+    if not usage_json:
+        return 0
+    
+    try:
+        usage = json.loads(usage_json)
+        if usage.get("date") == today:
+            return usage.get("photo_count", 0)
+        return 0
+    except:
+        return 0
+
+
+async def increment_photo_count(user_id: int):
+    """Увеличить счётчик фото за сегодня"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    usage_json = await get_fact(user_id, "daily_usage")
+    
+    if usage_json:
+        try:
+            usage = json.loads(usage_json)
+            if usage.get("date") == today:
+                usage["photo_count"] = usage.get("photo_count", 0) + 1
+            else:
+                usage = {"date": today, "photo_count": 1}
+        except:
+            usage = {"date": today, "photo_count": 1}
+    else:
+        usage = {"date": today, "photo_count": 1}
+    
+    await set_fact(user_id, "daily_usage", json.dumps(usage))
+
+
+async def can_analyze_photo(user_id: int) -> Tuple[bool, Optional[str]]:
+    """
+    Проверить может ли пользователь анализировать фото
+    Returns: (can_analyze, error_key_if_not)
+    """
+    # Проверяем подписку
+    is_valid, plan_or_error = await check_subscription_valid(user_id)
+    if not is_valid:
+        return False, plan_or_error
+    
+    plan = plan_or_error
+    
+    # Premium и trial - безлимит
+    if plan in ["premium", "trial"]:
+        return True, None
+    
+    # Basic - проверяем лимит
+    count = await get_daily_photo_count(user_id)
+    if count >= BASIC_DAILY_PHOTO_LIMIT:
+        return False, "photo_limit_reached"
+    
+    return True, None
+
+
+async def create_checkout_session(user_id: int, plan: str, lang: str) -> Optional[str]:
+    """Создать Stripe Checkout Session и вернуть URL"""
+    try:
+        price_id = STRIPE_PRICE_BASIC if plan == "basic" else STRIPE_PRICE_PREMIUM
+        
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price": price_id,
+                "quantity": 1,
+            }],
+            mode="subscription",
+            success_url=f"https://t.me/your_bot?start=payment_success",  # Заменить на реальный URL
+            cancel_url=f"https://t.me/your_bot?start=payment_cancel",
+            metadata={
+                "user_id": str(user_id),
+                "plan": plan
+            },
+            subscription_data={
+                "trial_period_days": TRIAL_DAYS,
+                "metadata": {
+                    "user_id": str(user_id),
+                    "plan": plan
+                }
+            }
+        )
+        
+        return session.url
+    except Exception as e:
+        logger.error(f"Error creating checkout session: {e}")
+        return None
+
+
+# ==================== STRIPE WEBHOOK HANDLER ====================
+
+async def handle_stripe_webhook(request):
+    """Обработчик Stripe webhook"""
+    payload = await request.read()
+    sig_header = request.headers.get("Stripe-Signature")
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        logger.error(f"Invalid payload: {e}")
+        return web.Response(status=400)
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid signature: {e}")
+        return web.Response(status=400)
+    
+    # Обработка событий
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        user_id = int(session["metadata"].get("user_id", 0))
+        plan = session["metadata"].get("plan", "basic")
+        
+        if user_id:
+            # Активируем подписку на 30 дней + 1 день триала
+            expires_at = datetime.now() + timedelta(days=31)
+            await set_subscription(
+                user_id, 
+                plan, 
+                expires_at,
+                session.get("customer"),
+                session.get("subscription")
+            )
+            
+            # Отправляем сообщение пользователю
+            user_lang = await get_fact(user_id, "language") or "ru"
+            plan_name = "Basic" if plan == "basic" else "Premium"
+            expires_str = expires_at.strftime("%d.%m.%Y")
+            
+            try:
+                await bot.send_message(
+                    user_id,
+                    get_text_lang(user_lang, "subscription_activated", plan=plan_name, expires=expires_str),
+                    reply_markup=create_main_menu(user_lang)
+                )
+            except Exception as e:
+                logger.error(f"Error sending activation message: {e}")
+    
+    elif event["type"] == "customer.subscription.updated":
+        subscription = event["data"]["object"]
+        user_id = int(subscription["metadata"].get("user_id", 0))
+        
+        if user_id and subscription["status"] == "active":
+            plan = subscription["metadata"].get("plan", "basic")
+            # Обновляем дату истечения
+            current_period_end = datetime.fromtimestamp(subscription["current_period_end"])
+            await set_subscription(
+                user_id,
+                plan,
+                current_period_end,
+                subscription.get("customer"),
+                subscription.get("id")
+            )
+    
+    elif event["type"] == "customer.subscription.deleted":
+        subscription = event["data"]["object"]
+        user_id = int(subscription["metadata"].get("user_id", 0))
+        
+        if user_id:
+            # Подписка отменена - устанавливаем истечение на сейчас
+            await set_subscription(user_id, "cancelled", datetime.now())
+    
+    return web.Response(status=200)
+
+
+# ==================== BOT HANDLERS ====================
+
 def format_food_card(food_name: str, calories: int, protein: float, fat: float, carbs: float, weight: int = 100, lang: str = "ru") -> str:
     """Форматирует красивую карточку с результатами анализа"""
     headers = {
@@ -623,9 +976,9 @@ def format_food_card(food_name: str, calories: int, protein: float, fat: float, 
         "en": "FOOD ANALYSIS"
     }
     labels = {
-        "ru": {"portion": "Порция", "cal": "Калории", "protein": "Белки", "fat": "Жиры", "carbs": "Углеводы", "kcal": "ккал", "g": "г"},
-        "cs": {"portion": "Porce", "cal": "Kalorie", "protein": "Bílkoviny", "fat": "Tuky", "carbs": "Sacharidy", "kcal": "kcal", "g": "g"},
-        "en": {"portion": "Portion", "cal": "Calories", "protein": "Protein", "fat": "Fat", "carbs": "Carbs", "kcal": "kcal", "g": "g"}
+        "ru": {"portion": "Порция", "cal": "Калории", "protein": "Белки", "fat": "Жиры", "carbs": "Углеводы"},
+        "cs": {"portion": "Porce", "cal": "Kalorie", "protein": "Bílkoviny", "fat": "Tuky", "carbs": "Sacharidy"},
+        "en": {"portion": "Portion", "cal": "Calories", "protein": "Protein", "fat": "Fat", "carbs": "Carbs"}
     }
     lbl = labels.get(lang, labels["ru"])
     header = headers.get(lang, headers["ru"])
@@ -635,12 +988,12 @@ def format_food_card(food_name: str, calories: int, protein: float, fat: float, 
         f"║   📊 {header}        ║\n"
         f"╠═══════════════════════════╣\n"
         f"║ 🍽 {food_name}\n"
-        f"║ ⚖️ {lbl['portion']}: ~{weight}{lbl['g']}\n"
+        f"║ ⚖️ {lbl['portion']}: ~{weight}г\n"
         f"║                           ║\n"
-        f"║ 🔥 {lbl['cal']}: {calories} {lbl['kcal']}\n"
-        f"║ 🥩 {lbl['protein']}: {protein}{lbl['g']}\n"
-        f"║ 🧈 {lbl['fat']}: {fat}{lbl['g']}\n"
-        f"║ 🍞 {lbl['carbs']}: {carbs}{lbl['g']}\n"
+        f"║ 🔥 {lbl['cal']}: {calories} ккал\n"
+        f"║ 🥩 {lbl['protein']}: {protein}г\n"
+        f"║ 🧈 {lbl['fat']}: {fat}г\n"
+        f"║ 🍞 {lbl['carbs']}: {carbs}г\n"
         f"╚═══════════════════════════╝"
     )
     return card
@@ -657,155 +1010,53 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
         
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
-        # Язык для ответа - ПОЛНОСТЬЮ РАЗДЕЛЬНЫЕ ПРОМПТЫ
-        if user_lang == "cs":
-            system_prompt = f"""Jsi zkušený AI dietolog a nutricionista.
+        db_description = "Примеры из базы продуктов:\n"
+        count = 0
+        for food_name, food_data in FOOD_DATABASE.items():
+            if count >= 15:
+                break
+            db_description += (
+                f"- {food_name}: {food_data['calories']} ккал/{food_data['portion']}, "
+                f"Б:{food_data['protein']}г Ж:{food_data['fat']}г У:{food_data['carbs']}г\n"
+            )
+            count += 1
 
-🚨 KRITICKY DŮLEŽITÉ - JAZYK:
-- Odpovídej VÝHRADNĚ ČESKY!
-- Název jídla MUSÍ být česky (např. "Těstoviny s masem", NE "Макароны")
-- Doporučení MUSÍ být česky
-- NIKDY nepoužívej ruštinu ani angličtinu!
+        response_lang = get_text_lang(user_lang, "gpt_response_lang")
 
-TVŮJ ÚKOL: Analyzovat fotku jídla a odhadnout kalorie a makra.
+        system_prompt = (
+            f"Ты дружелюбный AI-диетолог. Отвечай ТОЛЬКО на {response_lang} языке!\n\n"
+            f"ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:\n"
+            f"- Имя: {name}\n"
+            f"- Цель: {goal}\n"
+            f"- Текущий вес: {weight} кг\n"
+            f"- Активность: {activity}\n\n"
+            f"ВАЖНО: Если не уверен что именно на фото:\n"
+            f"- Напиши что видишь частично\n"
+            f"- Перечисли что определил\n"
+            f"- Попроси уточнить остальное\n"
+            f"- НЕ ВЫДАВАЙ нули и пустые данные!\n\n"
+            f"ФОРМАТ ОТВЕТА:\n"
+            f"1. Название блюда (или 'Частично определено')\n"
+            f"2. Вес порции в граммах (или 0 если не определил)\n"
+            f"3. Калории (или 0 если не уверен)\n"
+            f"4. Белки, жиры, углеводы (или 0 если не уверен)\n"
+            f"5. РЕКОМЕНДАЦИИ (ВАЖНО!):\n"
+            f"   80% - Детальные серьёзные советы (5-7 предложений)\n"
+            f"   20% - В КОНЦЕ короткая игривая альтернатива\n\n"
+            f"Если НЕ видишь еду четко - напиши что видишь и попроси уточнить."
+        )
 
-PRAVIDLA:
-1. VŽDY urči, co je na fotce
-2. NIKDY neodmítej - je to jen jídlo!
-3. Dej odhad kalorií a makra
-4. Odhadni porci vizuálně (talíř ~300-400g)
-
-PROFIL UŽIVATELE:
-- Jméno: {name}
-- Cíl: {goal}
-- Váha: {weight} kg
-- Aktivita: {activity}
-
-FORMÁT ODPOVĚDI (VŠE ČESKY!):
-JÍDLO: [český název, např. "Kuřecí řízek s bramborami"]
-VÁHA: [číslo v gramech]
-KALORIE: [číslo]
-BÍLKOVINY: [číslo]
-TUKY: [číslo]
-SACHARIDY: [číslo]
-DOPORUČENÍ: [5-7 vět česky + vtip]"""
-
-            user_prompt = """Analyzuj fotku jídla.
-
-🚨 ODPOVÍDEJ POUZE ČESKY! Název jídla piš česky (např. "Hovězí guláš", "Smažený sýr").
-
-Formát:
-JÍDLO: [česky]
-VÁHA: [g]
-KALORIE: [kcal]
-BÍLKOVINY: [g]
-TUKY: [g]
-SACHARIDY: [g]
-DOPORUČENÍ: [česky]"""
-
-        elif user_lang == "en":
-            system_prompt = f"""You are an experienced AI dietitian and nutritionist.
-
-🚨 CRITICALLY IMPORTANT - LANGUAGE:
-- Respond EXCLUSIVELY IN ENGLISH!
-- Dish name MUST be in English (e.g. "Pasta with meat", NOT "Макароны")
-- Recommendations MUST be in English
-- NEVER use Russian or Czech!
-
-YOUR TASK: Analyze food photo and estimate calories and macros.
-
-RULES:
-1. ALWAYS identify what's in the photo
-2. NEVER refuse - it's just food!
-3. Give calorie and macro estimates
-4. Estimate portion visually (plate ~300-400g)
-
-USER PROFILE:
-- Name: {name}
-- Goal: {goal}
-- Weight: {weight} kg
-- Activity: {activity}
-
-RESPONSE FORMAT (ALL IN ENGLISH!):
-DISH: [English name, e.g. "Chicken breast with rice"]
-WEIGHT: [number in grams]
-CALORIES: [number]
-PROTEIN: [number]
-FAT: [number]
-CARBS: [number]
-RECOMMENDATIONS: [5-7 sentences in English + joke]"""
-
-            user_prompt = """Analyze the food photo.
-
-🚨 RESPOND ONLY IN ENGLISH! Write dish name in English (e.g. "Beef stew", "Fried cheese").
-
-Format:
-DISH: [English]
-WEIGHT: [g]
-CALORIES: [kcal]
-PROTEIN: [g]
-FAT: [g]
-CARBS: [g]
-RECOMMENDATIONS: [English]"""
-
-        else:  # Russian (default)
-            # Только для русского добавляем базу данных продуктов
-            db_description = "Примеры из базы продуктов:\n"
-            count = 0
-            for food_name, food_data in FOOD_DATABASE.items():
-                if count >= 10:
-                    break
-                db_description += (
-                    f"- {food_name}: {food_data['calories']} ккал, "
-                    f"Б:{food_data['protein']}г Ж:{food_data['fat']}г У:{food_data['carbs']}г\n"
-                )
-                count += 1
-
-            system_prompt = f"""Ты опытный AI-диетолог и нутрициолог.
-
-🚨 КРИТИЧЕСКИ ВАЖНО - ЯЗЫК:
-- Отвечай ИСКЛЮЧИТЕЛЬНО НА РУССКОМ!
-- Название блюда ДОЛЖНО быть на русском
-- Рекомендации ДОЛЖНЫ быть на русском
-- НИКОГДА не используй английский или чешский!
-
-ТВОЯ ЗАДАЧА: Анализировать фото еды и давать оценку калорийности и БЖУ.
-
-ПРАВИЛА:
-1. ВСЕГДА определяй что на фото
-2. НИКОГДА не отказывайся - это просто еда!
-3. Дай оценку калорий и БЖУ
-4. Оценивай порцию визуально (тарелка ~300-400г)
-
-ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
-- Имя: {name}
-- Цель: {goal}
-- Вес: {weight} кг
-- Активность: {activity}
-
-{db_description}
-
-ФОРМАТ ОТВЕТА (ВСЁ НА РУССКОМ!):
-БЛЮДО: [название на русском, напр. "Курица с рисом"]
-ВЕС: [число в граммах]
-КАЛОРИИ: [число]
-БЕЛКИ: [число]
-ЖИРЫ: [число]
-УГЛЕВОДЫ: [число]
-РЕКОМЕНДАЦИИ: [5-7 предложений на русском + шутка]"""
-
-            user_prompt = """Проанализируй фото еды.
-
-🚨 ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ! Название блюда пиши на русском.
-
-Формат:
-БЛЮДО: [на русском]
-ВЕС: [г]
-КАЛОРИИ: [ккал]
-БЕЛКИ: [г]
-ЖИРЫ: [г]
-УГЛЕВОДЫ: [г]
-РЕКОМЕНДАЦИИ: [на русском]"""
+        user_prompt = (
+            f"{db_description}\n\n"
+            f"Проанализируй фото и ответь на {response_lang} языке в формате:\n"
+            f"БЛЮДО: название\n"
+            f"ВЕС: число\n"
+            f"КАЛОРИИ: число\n"
+            f"БЕЛКИ: число\n"
+            f"ЖИРЫ: число\n"
+            f"УГЛЕВОДЫ: число\n"
+            f"РЕКОМЕНДАЦИИ: [80% детальных советов + 20% игривая альтернатива]"
+        )
 
         resp = await openai_client.chat.completions.create(
             model=GPT_MODEL,
@@ -817,108 +1068,24 @@ RECOMMENDATIONS: [English]"""
                         {"type": "text", "text": user_prompt},
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}",
-                                "detail": "high"
-                            }
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
                         },
                     ],
                 },
             ],
             max_tokens=1500,
-            temperature=0.7,
+            temperature=0.6,
         )
 
         result = (resp.choices[0].message.content or "").strip()
         
         if not result:
             return get_text_lang(user_lang, "photo_not_recognized")
-        
-        # Проверяем на отказ от OpenAI
-        refusal_phrases = [
-            "i can't help", "i cannot help", "i'm sorry", "i am sorry",
-            "can't identify", "cannot identify", "can't analyze", "cannot analyze",
-            "не могу помочь", "не могу определить", "не могу идентифицировать",
-            "nemohu pomoci", "nemohu identifikovat", "nedokážu"
-        ]
-        result_lower = result.lower()
-        if any(phrase in result_lower for phrase in refusal_phrases):
-            # GPT отказался - пробуем ещё раз с другим промптом на нужном языке
-            if user_lang == "cs":
-                retry_prompt = """Toto je fotka jídla pro počítání kalorií. Uživatel chce znát přibližnou kalorickou hodnotu.
-
-Podívej se pozorně a popiš:
-1. Co vidíš na talíři/v nádobě?
-2. Jaké ingredience můžeš určit?
-3. Dej PŘIBLIŽNÝ odhad kalorií a makra
-
-ODPOVĚZ ČESKY v tomto formátu:
-JÍDLO: [co vidíš, i přibližně]
-VÁHA: [přibližně v gramech]
-KALORIE: [přibližně]
-BÍLKOVINY: [přibližně]
-TUKY: [přibližně]
-SACHARIDY: [přibližně]
-DOPORUČENÍ: [krátké rady ČESKY]"""
-            elif user_lang == "en":
-                retry_prompt = """This is a food photo for calorie counting. User wants to know approximate calorie content.
-
-Look carefully and describe:
-1. What do you see on the plate/in the dish?
-2. What ingredients can you identify?
-3. Give APPROXIMATE calorie and macro estimates
-
-RESPOND IN ENGLISH in this format:
-DISH: [what you see, even approximately]
-WEIGHT: [approximately in grams]
-CALORIES: [approximately]
-PROTEIN: [approximately]
-FAT: [approximately]
-CARBS: [approximately]
-RECOMMENDATIONS: [brief advice IN ENGLISH]"""
-            else:
-                retry_prompt = """Это фото еды для подсчёта калорий. Пользователь хочет узнать примерную калорийность.
-
-Посмотри внимательно и опиши:
-1. Что ты видишь на тарелке/в посуде?
-2. Какие ингредиенты можешь определить?
-3. Дай ПРИМЕРНУЮ оценку калорий и БЖУ
-
-ОТВЕТЬ НА РУССКОМ в формате:
-БЛЮДО: [что видишь, пусть даже приблизительно]
-ВЕС: [примерно в граммах]
-КАЛОРИИ: [примерно]
-БЕЛКИ: [примерно]
-ЖИРЫ: [примерно]
-УГЛЕВОДЫ: [примерно]
-РЕКОМЕНДАЦИИ: [краткие советы НА РУССКОМ]"""
-
-            resp = await openai_client.chat.completions.create(
-                model=GPT_MODEL,
-                messages=[
-                    {"role": "user", "content": [
-                        {"type": "text", "text": retry_prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}", "detail": "high"}}
-                    ]}
-                ],
-                max_tokens=1500,
-                temperature=0.8,
-            )
-            result = (resp.choices[0].message.content or "").strip()
-            
-            if not result or any(phrase in result.lower() for phrase in refusal_phrases):
-                # Всё ещё отказывается - просим описать что видит
-                ask_text = {
-                    "ru": "🤔 Не удалось автоматически распознать блюдо.\n\nПожалуйста, напиши что это за еда, и я посчитаю калории!\nНапример: 'тарелка пасты с курицей' или 'гречка с котлетой'",
-                    "cs": "🤔 Nepodařilo se automaticky rozpoznat jídlo.\n\nNapiš prosím, co to je za jídlo, a spočítám kalorie!\nNapříklad: 'talíř těstovin s kuřetem' nebo 'pohanka s karbanátkem'",
-                    "en": "🤔 Couldn't automatically recognize the dish.\n\nPlease tell me what food it is and I'll count the calories!\nFor example: 'plate of pasta with chicken' or 'rice with meatballs'"
-                }
-                return ask_text.get(user_lang, ask_text["ru"])
 
         # Парсим ответ
         lines = result.split('\n')
-        food_name = ""
-        weight_g = 0
+        food_name = "Блюдо"
+        weight_g = 100
         calories = 0
         protein = 0.0
         fat = 0.0
@@ -926,69 +1093,47 @@ RECOMMENDATIONS: [brief advice IN ENGLISH]"""
         recommendations = ""
         
         for line in lines:
-            line_lower = line.lower().strip()
-            
-            # Название блюда
-            if any(x in line_lower for x in ['блюдо:', 'dish:', 'jídlo:', 'блюдо :', 'dish :', 'jídlo :']):
-                parts = line.split(':', 1)
-                if len(parts) > 1:
-                    food_name = parts[1].strip()
-            
-            # Вес
-            elif any(x in line_lower for x in ['вес:', 'weight:', 'váha:', 'вес :', 'hmotnost:']):
+            line_lower = line.lower()
+            if 'блюдо:' in line_lower or 'dish:' in line_lower or 'jídlo:' in line_lower:
+                food_name = line.split(':', 1)[1].strip()
+            elif 'вес:' in line_lower or 'weight:' in line_lower or 'váha:' in line_lower:
                 nums = re.findall(r'\d+', line)
                 if nums:
                     weight_g = int(nums[0])
-            
-            # Калории
-            elif any(x in line_lower for x in ['калор', 'calor', 'kalor', 'ккал', 'kcal']):
+            elif 'калор' in line_lower or 'calor' in line_lower or 'kalor' in line_lower:
                 nums = re.findall(r'\d+', line)
                 if nums:
                     calories = int(nums[0])
-            
-            # Белки
-            elif any(x in line_lower for x in ['белк', 'protein', 'bílk', 'білк']):
-                nums = re.findall(r'[\d]+[.,]?[\d]*', line)
+            elif 'белк' in line_lower or 'protein' in line_lower or 'bílk' in line_lower:
+                nums = re.findall(r'\d+\.?\d*', line)
                 if nums:
-                    protein = float(nums[0].replace(',', '.'))
-            
-            # Жиры
-            elif any(x in line_lower for x in ['жир', 'fat', 'tuk', 'tuky']):
-                nums = re.findall(r'[\d]+[.,]?[\d]*', line)
+                    protein = float(nums[0])
+            elif 'жир' in line_lower or 'fat' in line_lower or 'tuk' in line_lower:
+                nums = re.findall(r'\d+\.?\d*', line)
                 if nums:
-                    fat = float(nums[0].replace(',', '.'))
-            
-            # Углеводы
-            elif any(x in line_lower for x in ['углевод', 'carb', 'sacharid', 'uhlohydr']):
-                nums = re.findall(r'[\d]+[.,]?[\d]*', line)
+                    fat = float(nums[0])
+            elif 'углевод' in line_lower or 'carb' in line_lower or 'sacharid' in line_lower:
+                nums = re.findall(r'\d+\.?\d*', line)
                 if nums:
-                    carbs = float(nums[0].replace(',', '.'))
+                    carbs = float(nums[0])
         
         # Собираем рекомендации
         rec_started = False
         rec_lines = []
         for line in lines:
             ll = line.lower()
-            if any(x in ll for x in ['рекоменд', 'recommend', 'doporuč', 'rada', 'tip']):
+            if 'рекоменд' in ll or 'recommend' in ll or 'doporuč' in ll:
                 rec_started = True
                 if ':' in line:
-                    after_colon = line.split(':', 1)[1].strip()
-                    if after_colon:
-                        rec_lines.append(after_colon)
+                    rec_lines.append(line.split(':', 1)[1].strip())
                 continue
             if rec_started and line.strip():
                 rec_lines.append(line.strip())
         recommendations = '\n'.join(rec_lines)
         
-        # Если не распознал числа - показываем сырой ответ GPT
-        if calories == 0 and protein == 0 and fat == 0 and carbs == 0 and weight_g == 0:
-            return f"🍽 {result}"
-        
-        # Устанавливаем дефолты если что-то пропущено
-        if not food_name:
-            food_name = {"ru": "Блюдо", "cs": "Jídlo", "en": "Dish"}.get(user_lang, "Блюдо")
-        if weight_g == 0:
-            weight_g = 250  # Средняя порция
+        # Если не распознал
+        if calories == 0 and protein == 0 and fat == 0 and carbs == 0:
+            return f"🤔 {result}"
         
         # Создаём карточку
         card = format_food_card(food_name, calories, protein, fat, carbs, weight_g, user_lang)
@@ -1058,12 +1203,22 @@ async def cmd_start(message: Message, state: FSMContext):
     missing = await profile_missing(user_id)
     
     if missing is None:
+        # Профиль заполнен - проверяем подписку
         user_lang = await get_fact(user_id, "language") or "ru"
         name = await get_fact(user_id, "name") or "друг"
-        menu = create_main_menu(user_lang)
         
-        welcome = get_text_lang(user_lang, "welcome_back", name=name)
-        await message.answer(welcome, reply_markup=menu)
+        is_valid, plan_or_error = await check_subscription_valid(user_id)
+        
+        if is_valid:
+            menu = create_main_menu(user_lang)
+            welcome = get_text_lang(user_lang, "welcome_back", name=name)
+            await message.answer(welcome, reply_markup=menu)
+        else:
+            # Нужна подписка
+            await message.answer(
+                get_text_lang(user_lang, plan_or_error),
+                reply_markup=ReplyKeyboardRemove()
+            )
         return
 
     if missing == "language":
@@ -1094,6 +1249,76 @@ async def cmd_start(message: Message, state: FSMContext):
         ask_name = get_text_lang(user_lang, "ask_name")
         await message.answer(ask_name)
         await state.set_state(Onboarding.waiting_name)
+
+
+# -------------------- /subscribe --------------------
+@dp.message(Command("subscribe"))
+async def cmd_subscribe(message: Message):
+    """Show subscription options"""
+    user_id = message.from_user.id
+    user_lang = await get_fact(user_id, "language") or "ru"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=get_text_lang(user_lang, "btn_basic"), callback_data="sub_basic")],
+        [InlineKeyboardButton(text=get_text_lang(user_lang, "btn_premium"), callback_data="sub_premium")]
+    ])
+    
+    await message.answer(
+        get_text_lang(user_lang, "choose_plan"),
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+
+@dp.callback_query(F.data.in_(["sub_basic", "sub_premium"]))
+async def handle_subscription_choice(callback: CallbackQuery):
+    """Handle subscription plan selection"""
+    user_id = callback.from_user.id
+    user_lang = await get_fact(user_id, "language") or "ru"
+    plan = "basic" if callback.data == "sub_basic" else "premium"
+    
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    
+    # Создаём Stripe checkout session
+    checkout_url = await create_checkout_session(user_id, plan, user_lang)
+    
+    if checkout_url:
+        await callback.message.answer(
+            get_text_lang(user_lang, "payment_link", url=checkout_url)
+        )
+    else:
+        await callback.message.answer(get_text_lang(user_lang, "chat_error"))
+
+
+# -------------------- /status --------------------
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    """Show subscription status"""
+    user_id = message.from_user.id
+    user_lang = await get_fact(user_id, "language") or "ru"
+    
+    sub = await get_subscription(user_id)
+    
+    if not sub:
+        await message.answer(get_text_lang(user_lang, "subscription_required"))
+        return
+    
+    plan = sub.get("plan", "none")
+    expires_at = datetime.fromisoformat(sub["expires_at"])
+    expires_str = expires_at.strftime("%d.%m.%Y")
+    
+    plan_names = {"basic": "Basic", "premium": "Premium", "trial": "Trial"}
+    plan_name = plan_names.get(plan, plan.capitalize())
+    
+    # Получаем использование
+    used = await get_daily_photo_count(user_id)
+    limit = "∞" if plan == "premium" else str(BASIC_DAILY_PHOTO_LIMIT)
+    
+    await message.answer(
+        get_text_lang(user_lang, "subscription_status", 
+                     plan=plan_name, expires=expires_str, used=used, limit=limit)
+    )
 
 
 @dp.callback_query(LanguageSelection.waiting_language)
@@ -1285,7 +1510,7 @@ async def onboarding_wha(message: Message, state: FSMContext):
 # -------------------- onboarding: activity --------------------
 @dp.callback_query(Onboarding.waiting_activity)
 async def onboarding_activity_callback(callback: CallbackQuery, state: FSMContext):
-    """Handle activity selection"""
+    """Handle activity selection - завершение онбординга"""
     user_id = callback.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
     
@@ -1301,12 +1526,23 @@ async def onboarding_activity_callback(callback: CallbackQuery, state: FSMContex
     
     await callback.message.edit_reply_markup(reply_markup=None)
     await state.clear()
-    
-    menu = create_main_menu(user_lang)
     await callback.answer()
     
+    # Онбординг завершён - показываем выбор подписки
     complete_msg = get_text_lang(user_lang, "onboarding_complete")
-    await callback.message.answer(complete_msg, reply_markup=menu)
+    await callback.message.answer(complete_msg)
+    
+    # Показываем тарифы
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=get_text_lang(user_lang, "btn_basic"), callback_data="sub_basic")],
+        [InlineKeyboardButton(text=get_text_lang(user_lang, "btn_premium"), callback_data="sub_premium")]
+    ])
+    
+    await callback.message.answer(
+        get_text_lang(user_lang, "choose_plan"),
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
 
 
 @dp.message(Onboarding.waiting_activity, F.text)
@@ -1334,21 +1570,42 @@ async def onboarding_activity_text(message: Message, state: FSMContext):
     await set_facts(user_id, {"activity": activity, "job": ""})
     await state.clear()
     
-    menu = create_main_menu(user_lang)
+    # Показываем выбор подписки
     complete_msg = get_text_lang(user_lang, "onboarding_complete")
-    await message.answer(complete_msg, reply_markup=menu)
+    await message.answer(complete_msg)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=get_text_lang(user_lang, "btn_basic"), callback_data="sub_basic")],
+        [InlineKeyboardButton(text=get_text_lang(user_lang, "btn_premium"), callback_data="sub_premium")]
+    ])
+    
+    await message.answer(
+        get_text_lang(user_lang, "choose_plan"),
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
 
 
 # -------------------- photo handler --------------------
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
-    """Handle photo with animated emoji reactions"""
+    """Handle photo with subscription check"""
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
 
+    # Проверяем профиль
     missing = await profile_missing(user_id)
     if missing is not None:
         await message.answer(get_text_lang(user_lang, "photo_complete_first"))
+        return
+
+    # Проверяем подписку и лимиты
+    can_analyze, error_key = await can_analyze_photo(user_id)
+    if not can_analyze:
+        if error_key == "photo_limit_reached":
+            await message.answer(get_text_lang(user_lang, error_key, limit=BASIC_DAILY_PHOTO_LIMIT))
+        else:
+            await message.answer(get_text_lang(user_lang, error_key))
         return
 
     status_msg = await message.answer(get_text_lang(user_lang, "analyzing_1"))
@@ -1368,6 +1625,9 @@ async def handle_photo(message: Message, state: FSMContext):
         photo_bytes = buf.getvalue()
 
         result = await analyze_food_photo(photo_bytes, user_id)
+        
+        # Увеличиваем счётчик фото
+        await increment_photo_count(user_id)
         
         await status_msg.edit_text(get_text_lang(user_lang, "analyzing_done"))
         await asyncio.sleep(0.5)
@@ -1390,6 +1650,12 @@ async def handle_voice(message: Message, state: FSMContext):
     """Handle voice messages"""
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
     
     status_msg = await message.answer(get_text_lang(user_lang, "voice_listening"))
 
@@ -1487,6 +1753,13 @@ async def menu_weigh_in(message: Message, state: FSMContext):
     """Handle weigh-in button"""
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
+    
     await message.answer(get_text_lang(user_lang, "weigh_in_prompt"))
     await state.set_state(WeightTracking.waiting_weight)
 
@@ -1578,6 +1851,13 @@ async def process_weight_input(message: Message, state: FSMContext):
 async def menu_photo(message: Message):
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
+    
     await message.answer(get_text_lang(user_lang, "photo_prompt"))
 
 
@@ -1585,6 +1865,13 @@ async def menu_photo(message: Message):
 async def menu_question(message: Message):
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
+    
     await message.answer(get_text_lang(user_lang, "question_prompt"))
 
 
@@ -1592,6 +1879,13 @@ async def menu_question(message: Message):
 async def menu_meal_plan(message: Message):
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
+    
     name = await get_fact(user_id, "name") or "друг"
     goal = await get_fact(user_id, "goal") or "maintain"
     
@@ -1606,6 +1900,13 @@ async def menu_meal_plan(message: Message):
 async def menu_workout(message: Message):
     user_id = message.from_user.id
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
+    
     name = await get_fact(user_id, "name") or "друг"
     goal = await get_fact(user_id, "goal") or "maintain"
     
@@ -1769,6 +2070,13 @@ async def handle_text(message: Message, state: FSMContext):
         return
 
     user_lang = await get_fact(user_id, "language") or "ru"
+    
+    # Проверяем подписку для обычных сообщений
+    is_valid, error_key = await check_subscription_valid(user_id)
+    if not is_valid:
+        await message.answer(get_text_lang(user_lang, error_key))
+        return
+    
     low = text.lower()
     if any(x in low for x in ["привет", "здрав", "hello", "hi", "ahoj", "čau"]):
         name = await get_fact(user_id, "name") or "друг"
@@ -1782,17 +2090,29 @@ async def handle_text(message: Message, state: FSMContext):
 
 # -------------------- run --------------------
 async def main():
-    logger.info("🚀 Starting Dietitian Bot...")
+    logger.info("🚀 Starting Dietitian Bot with Stripe...")
     logger.info(f"📊 GPT Model: {GPT_MODEL}")
 
     await init_db()
     logger.info("✅ Database initialized")
+
+    # Создаём aiohttp app для webhook
+    app = web.Application()
+    app.router.add_post("/stripe/webhook", handle_stripe_webhook)
+    
+    # Запускаем webhook сервер в фоне
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    logger.info("✅ Stripe webhook server started on port 8080")
 
     try:
         logger.info("🤖 Bot is polling...")
         await dp.start_polling(bot)
     finally:
         logger.info("🛑 Shutting down...")
+        await runner.cleanup()
         try:
             await bot.session.close()
         except:
