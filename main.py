@@ -1038,8 +1038,83 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
         base64_image = base64.b64encode(photo_bytes).decode("utf-8")
 
         response_lang = get_text_lang(user_lang, "gpt_response_lang")
+        
+        # Промпты на разных языках для точного ответа
+        if user_lang == "cs":
+            system_prompt = f"""Jsi zkušený dietolog. Analyzuj fotku jídla a dej přesný odhad.
+ODPOVÍDEJ POUZE ČESKY!
 
-        system_prompt = f"""Ты опытный диетолог-нутрициолог. Анализируй фото еды и давай точную оценку.
+PROFIL UŽIVATELE:
+- Jméno: {name}
+- Cíl: {goal}
+- Váha: {weight} kg
+- Aktivita: {activity}
+
+TVŮJ ÚKOL:
+1. Urči jaké jídlo je na fotce
+2. Odhadni velikost porce v gramech
+3. Vypočítej KBJU pro tuto porci
+4. Dej užitečné doporučení
+
+DŮLEŽITÉ - ODPOVĚZ PŘESNĚ V TOMTO FORMÁTU:
+NÁZEV: [název jídla]
+PORCE: [číslo] g
+KCAL: [číslo]
+BÍLKOVINY: [číslo] g
+TUKY: [číslo] g
+SACHARIDY: [číslo] g
+DOPORUČENÍ: [tvé rady]
+
+PRAVIDLA:
+- Porce běžného talíře = 250-400g
+- Maso/ryba = minimálně 150-200g a 200-400 kcal
+- Příloha = 150-250g a 150-300 kcal
+- Salát = 200-350g a 100-250 kcal
+- NEPIŠ 3 kcal nebo 2g — to není realistické!
+- Minimum pro jakékoliv jídlo: 50 kcal
+
+ODPOVÍDEJ POUZE ČESKY!"""
+            user_prompt = "Analyzuj toto jídlo. Dej realistický odhad KBJU."
+            
+        elif user_lang == "en":
+            system_prompt = f"""You are an experienced dietitian. Analyze the food photo and give accurate estimates.
+RESPOND ONLY IN ENGLISH!
+
+USER PROFILE:
+- Name: {name}
+- Goal: {goal}
+- Weight: {weight} kg
+- Activity: {activity}
+
+YOUR TASK:
+1. Identify the food in the photo
+2. Estimate portion size in grams
+3. Calculate macros for this portion
+4. Give useful recommendations
+
+IMPORTANT - RESPOND EXACTLY IN THIS FORMAT:
+NAME: [food name]
+PORTION: [number] g
+KCAL: [number]
+PROTEIN: [number] g
+FAT: [number] g
+CARBS: [number] g
+RECOMMENDATIONS: [your advice]
+
+RULES:
+- Regular plate portion = 250-400g
+- Meat/fish = at least 150-200g and 200-400 kcal
+- Side dish = 150-250g and 150-300 kcal
+- Salad = 200-350g and 100-250 kcal
+- DON'T write 3 kcal or 2g — that's unrealistic!
+- Minimum for any food: 50 kcal
+
+RESPOND ONLY IN ENGLISH!"""
+            user_prompt = "Analyze this food. Give realistic macro estimates."
+            
+        else:  # ru по умолчанию
+            system_prompt = f"""Ты опытный диетолог-нутрициолог. Анализируй фото еды и давай точную оценку.
+ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ!
 
 ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ:
 - Имя: {name}
@@ -1070,9 +1145,8 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
 - НЕ ПИШИ 3 ккал или 2г — это нереалистично для еды!
 - Минимум для любой еды: 50 ккал
 
-Отвечай на {response_lang} языке."""
-
-        user_prompt = "Проанализируй это блюдо. Дай реалистичную оценку КБЖУ."
+ОТВЕЧАЙ ТОЛЬКО НА РУССКОМ ЯЗЫКЕ!"""
+            user_prompt = "Проанализируй это блюдо. Дай реалистичную оценку КБЖУ."
 
         resp = await openai_client.chat.completions.create(
             model=GPT_MODEL,
@@ -1114,7 +1188,7 @@ async def analyze_food_photo(photo_bytes: bytes, user_id: int) -> str:
             line_lower = line.lower().strip()
             
             # Название блюда
-            if any(x in line_lower for x in ['название:', 'name:', 'блюдо:', 'dish:', 'jídlo:']):
+            if any(x in line_lower for x in ['название:', 'name:', 'блюдо:', 'dish:', 'jídlo:', 'název:']):
                 parts = line.split(':', 1)
                 if len(parts) > 1:
                     food_name = parts[1].strip()
