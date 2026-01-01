@@ -2419,21 +2419,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-    try:
-        logger.info("🤖 Bot is polling...")
-        await dp.start_polling(bot)
-    finally:
-        logger.info("🛑 Shutting down...")
-        await runner.cleanup()
-        try:
-            await bot.session.close()
-        except:
-            pass
-        try:
-            await http_client.aclose()
-        except:
-            pass
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+   
