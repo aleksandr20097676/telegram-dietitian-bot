@@ -28,7 +28,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, R
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from config import (
     TELEGRAM_TOKEN, OPENAI_API_KEY, GPT_MODEL,
     STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
@@ -47,7 +47,11 @@ stripe.api_key = STRIPE_SECRET_KEY
 import os
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "1642251041")  # По умолчанию твой ID
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit()]
-
+# -------------------- Webhook Configuration --------------------
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "")
+WEBHOOK_PATH = f"/webhook/{TELEGRAM_TOKEN}"
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}" if WEBHOOK_HOST else ""
+WEB_SERVER_PORT = int(os.getenv("PORT", 8080))
 # -------------------- logging --------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -2381,23 +2385,39 @@ async def handle_text(message: Message, state: FSMContext):
 
 
 # -------------------- run --------------------
-async def main():
-    logger.info("🚀 Starting Dietitian Bot with Stripe...")
-    logger.info(f"📊 GPT Model: {GPT_MODEL}")
-
+async def on_startup(app):
     await init_db()
     logger.info("✅ Database initialized")
+    if WEBHOOK_URL:
+        await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
+        logger.info(f"✅ Webhook set: {WEBHOOK_URL}")
 
-    # Создаём aiohttp app для webhook
+async def on_shutdown(app):
+    await bot.delete_webhook()
+    await bot.session.close()
+    await http_client.aclose()
+
+async def health_check(request):
+    return web.Response(text="OK", status=200)
+
+def main():
+    logger.info(f"🚀 Starting bot on port {WEB_SERVER_PORT}")
+    
     app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
     app.router.add_post("/stripe/webhook", handle_stripe_webhook)
     
-    # Запускаем webhook сервер в фоне
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-    logger.info("✅ Stripe webhook server started on port 8080")
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+    
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    web.run_app(app, host="0.0.0.0", port=WEB_SERVER_PORT)
+
+if __name__ == "__main__":
+    main()
 
     try:
         logger.info("🤖 Bot is polling...")
