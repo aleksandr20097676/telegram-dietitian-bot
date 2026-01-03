@@ -982,7 +982,7 @@ async def handle_stripe_webhook(request):
             current_period_end = datetime.fromtimestamp(period_end)
         else:
             current_period_end = datetime.now() + timedelta(days=30)
-            await set_subscription(
+        await set_subscription(
                 user_id,
                 plan,
                 current_period_end,
