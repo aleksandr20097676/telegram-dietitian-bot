@@ -970,14 +970,18 @@ async def handle_stripe_webhook(request):
             except Exception as e:
                 logger.error(f"Error sending activation message: {e}")
     
-    elif event["type"] == "customer.subscription.updated":
-        subscription = event["data"]["object"]
-        user_id = int(subscription["metadata"].get("user_id", 0))
-        
-        if user_id and subscription["status"] == "active":
-            plan = subscription["metadata"].get("plan", "basic")
-            # Обновляем дату истечения
-            current_period_end = datetime.fromtimestamp(subscription["current_period_end"])
+   elif event["type"] == "customer.subscription.updated":
+    subscription = event["data"]["object"]
+    user_id = int(subscription["metadata"].get("user_id", 0))
+    
+    if user_id and subscription["status"] == "active":
+        plan = subscription["metadata"].get("plan", "basic")
+        # Обновляем дату истечения
+        period_end = subscription.get("current_period_end")
+        if period_end:
+            current_period_end = datetime.fromtimestamp(period_end)
+        else:
+            current_period_end = datetime.now() + timedelta(days=30)
             await set_subscription(
                 user_id,
                 plan,
