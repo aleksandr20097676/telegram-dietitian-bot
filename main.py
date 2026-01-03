@@ -977,7 +977,12 @@ async def handle_stripe_webhook(request):
         if user_id and subscription["status"] == "active":
             plan = subscription["metadata"].get("plan", "basic")
             # Обновляем дату истечения
-            current_period_end = datetime.fromtimestamp(subscription["current_period_end"])
+            period_end_ts = subscription.get("current_period_end")
+        if not period_end_ts:
+    return web.Response(status=200)
+
+        current_period_end = datetime.fromtimestamp(period_end_ts)
+
             await set_subscription(
                 user_id,
                 plan,
